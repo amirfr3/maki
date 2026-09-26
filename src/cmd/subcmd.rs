@@ -13,7 +13,7 @@ use maki_config::providers::{
     resolve_base_url, resolve_default_model, resolve_display_name, resolve_login_url, slugify,
 };
 use maki_providers::provider::fetch_all_models;
-use maki_providers::spec::ProviderRegistry;
+use maki_providers::spec::Owner;
 use maki_providers::{ProviderData, catalog_providers};
 use maki_providers::{copilot_auth, dynamic, openai_auth, xai_auth};
 use maki_storage::StateDir;
@@ -63,12 +63,12 @@ fn login_provider(slug: &str, storage: &StateDir) -> Result<()> {
     let mut config = ProvidersConfig::load();
     let def = config.get(slug).cloned();
 
-    if lacks_protocol(slug, def.as_ref())
-        && dynamic::display_name(slug).is_none()
-        && maki_providers::catalog_provider(slug).is_none()
-    {
+    // Past the check above, an `Unknown` owner is a `providers.toml` entry with
+    // no `protocol`. Login would say "Configured" and it would never work,
+    // unless the slug is a models.dev provider, which brings its own protocol.
+    if matches!(Owner::of(slug), Owner::Unknown) && known_outside_catalog(slug, &catalog_slugs()) {
         bail!(
-            "providers.toml entry [{slug}] has no `protocol`, so maki cannot talk to it\n\
+            "providers.toml entry [{slug}] has no `protocol` and is not a models.dev provider, so maki cannot talk to it\n\
              add `protocol` ({PROTOCOL_CHOICES}) and `base_url`, or run `maki auth login` and pick \"Custom provider...\"\n\n\
              See {PROVIDERS_TOML_DOCS}"
         );
@@ -148,10 +148,18 @@ fn login_provider(slug: &str, storage: &StateDir) -> Result<()> {
     Ok(())
 }
 
-/// A `providers.toml` entry that no built-in owns is a custom provider, and
-/// nothing can be built from one without a wire protocol (#1057).
-fn lacks_protocol(slug: &str, def: Option<&ProviderDef>) -> bool {
-    def.is_some_and(|d| d.protocol.is_none()) && ProviderRegistry::get(slug).is_none()
+fn catalog_slugs() -> Vec<String> {
+    catalog_providers()
+        .into_iter()
+        .map(|provider| provider.slug)
+        .collect()
+}
+
+/// An empty list means models.dev could not load, say offline with a cold
+/// cache. The slug may still be one of its providers then, so only a loaded
+/// catalog can rule it out.
+fn known_outside_catalog(slug: &str, catalog_slugs: &[String]) -> bool {
+    !catalog_slugs.is_empty() && !catalog_slugs.iter().any(|known| known == slug)
 }
 
 fn login_interactive(storage: &StateDir) -> Result<()> {
@@ -728,27 +736,21 @@ pub fn prompt(
 
 #[cfg(test)]
 mod tests {
-    use maki_config::providers::Protocol;
     use test_case::test_case;
 
     use super::*;
 
-    const CUSTOM_SLUG: &str = "localai";
+    const CATALOG_SLUG: &str = "fireworks-ai";
+    const OTHER_CATALOG_SLUG: &str = "togetherai";
 
-    #[test_case(CUSTOM_SLUG, Some(None), true ; "bare_custom_entry")]
-    #[test_case(CUSTOM_SLUG, Some(Some(Protocol::Openai)), false ; "custom_entry_with_protocol")]
-    #[test_case(CUSTOM_SLUG, None, false ; "no_entry")]
-    #[test_case("mistral", Some(None), false ; "builtin_override")]
-    #[test_case("opencode", Some(None), false ; "catalog_backed_builtin_override")]
-    fn lacks_protocol_only_flags_custom_entries(
-        slug: &str,
-        protocol: Option<Option<Protocol>>,
-        expected: bool,
-    ) {
-        let def = protocol.map(|protocol| ProviderDef {
-            protocol,
-            ..ProviderDef::default()
-        });
-        assert_eq!(lacks_protocol(slug, def.as_ref()), expected);
+    #[test_case(&[], false ; "unloaded_catalog_rules_nothing_out")]
+    #[test_case(&[CATALOG_SLUG], false ; "slug_in_loaded_catalog")]
+    #[test_case(&[OTHER_CATALOG_SLUG], true ; "slug_missing_from_loaded_catalog")]
+    fn known_outside_catalog_needs_a_loaded_catalog(catalog: &[&str], expected: bool) {
+        let catalog_slugs: Vec<String> = catalog.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            known_outside_catalog(CATALOG_SLUG, &catalog_slugs),
+            expected
+        );
     }
 }

@@ -1,14 +1,16 @@
+use std::collections::HashSet;
 use std::fmt::Display;
 use std::io::{self, Write};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use color_eyre::Result;
-use color_eyre::eyre::{Context, eyre};
+use color_eyre::eyre::{Context, bail, eyre};
 
+use maki_config::{ModelPolicy, ProviderConfig};
 use maki_providers::model::{Model, ModelError, ModelTier};
-use maki_providers::provider::provider_available;
-use maki_providers::spec::ProviderRegistry;
-use maki_providers::{custom, dynamic};
+use maki_providers::provider::provider_for_slug;
+use maki_providers::spec::{Owner, ProviderRegistry};
+use maki_providers::{AgentError, Timeouts, custom, dynamic};
 use maki_storage::StateDir;
 use maki_storage::log::RotatingFileWriter;
 use maki_storage::model::read_model;
@@ -32,11 +34,13 @@ const PROVIDER_PRIORITY: &[&str] = &[
 ];
 const STARTUP_TIERS: [ModelTier; 2] = [ModelTier::Strong, ModelTier::Medium];
 
+/// The model to start on, plus a warning when the saved one had to be skipped.
+/// Logging is not up this early, so the caller has to show the warning.
 pub fn resolve_model(
     explicit: Option<&str>,
-    provider_config: &maki_config::ProviderConfig,
+    provider_config: &ProviderConfig,
     storage: &StateDir,
-) -> Result<Model> {
+) -> Result<(Model, Option<String>)> {
     let policy = &provider_config.model_policy;
     if let Some(spec) = explicit {
         if !policy.allows(spec) {
@@ -44,20 +48,36 @@ pub fn resolve_model(
                 "model {spec:?} is not allowed by provider model policy"
             ));
         }
-        return from_spec_or_warm_catalog(spec).context("invalid --model spec");
+        let model = from_spec_or_warm_catalog(spec).context("invalid --model spec")?;
+        return Ok((model, None));
     }
-    if let Some(spec) = read_model(storage) {
-        if policy.allows(&spec)
-            && let Ok(m) = from_spec_or_warm_catalog(&spec)
-            && provider_available(&m.provider)
-        {
-            return Ok(m);
+    let Some(spec) = read_model(storage) else {
+        return Ok((fallback_model(provider_config)?, None));
+    };
+    let skipped = match saved_model(&spec, policy) {
+        Ok(model) => return Ok((model, None)),
+        Err(reason) => format!("saved model {spec} unavailable ({reason:#})"),
+    };
+    match fallback_model(provider_config) {
+        Ok(model) => {
+            let warning = format!("{skipped}, using {}", model.spec());
+            Ok((model, Some(warning)))
         }
-        tracing::warn!(
-            spec,
-            "saved model unavailable or disallowed, falling back to default"
-        );
+        Err(error) => Err(error.wrap_err(skipped)),
     }
+}
+
+fn saved_model(spec: &str, policy: &ModelPolicy) -> Result<Model> {
+    if !policy.allows(spec) {
+        bail!("not allowed by provider model policy");
+    }
+    let model = from_spec_or_warm_catalog(spec)?;
+    provider_ready(&model.provider)?;
+    Ok(model)
+}
+
+fn fallback_model(provider_config: &ProviderConfig) -> Result<Model> {
+    let policy = &provider_config.model_policy;
     if let Some(spec) = provider_config.default_model.as_deref() {
         if !policy.allows(spec) {
             return Err(eyre!(
@@ -72,10 +92,21 @@ pub fn resolve_model(
         } else {
             ""
         };
-        color_eyre::eyre::eyre!(
+        eyre!(
             "no provider available - set an API key (e.g. ANTHROPIC_API_KEY), run `maki auth login`, or use -m to specify a model{policy_note}\n\nSee https://maki.sh/docs/providers/ for setup instructions"
         )
     })
+}
+
+/// Building a `providers/` script runs its `resolve`, which may pop a 1Password
+/// or Touch ID prompt. The real build right after would ask again, so here a
+/// script only has to be installed. If its `resolve` fails, that real build
+/// reports it instead of us quietly switching providers.
+fn provider_ready(slug: &str) -> Result<(), AgentError> {
+    if matches!(Owner::of(slug), Owner::Script) {
+        return Ok(());
+    }
+    provider_for_slug(slug, Timeouts::default()).map(drop)
 }
 
 /// An unknown slug may just mean the models.dev catalog has not been loaded
@@ -91,10 +122,10 @@ fn from_spec_or_warm_catalog(spec: &str) -> Result<Model, ModelError> {
     }
 }
 
-fn auto_detect_model(policy: &maki_config::ModelPolicy) -> Option<Model> {
+fn auto_detect_model(policy: &ModelPolicy) -> Option<Model> {
     for tier in STARTUP_TIERS {
         for &slug in PROVIDER_PRIORITY {
-            if provider_available(slug)
+            if provider_ready(slug).is_ok()
                 && let Ok(model) = Model::from_tier(slug, tier)
                 && policy.allows(&model.spec())
             {
@@ -102,8 +133,12 @@ fn auto_detect_model(policy: &maki_config::ModelPolicy) -> Option<Model> {
             }
         }
     }
+    let mut checked = HashSet::new();
     user_provider_models()
-        .find(|model| policy.allows(&model.spec()) && provider_available(&model.provider))
+        .filter(|model| policy.allows(&model.spec()))
+        .find(|model| {
+            checked.insert(Arc::clone(&model.provider)) && provider_ready(&model.provider).is_ok()
+        })
 }
 
 /// Scripts in `providers/`, then `providers.toml` entries. They come after the
