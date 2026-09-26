@@ -498,6 +498,20 @@ fn with_provider_if_available<T>(slug: &str, f: impl FnOnce(&ProviderData) -> T)
     guard.providers.get(slug).map(f)
 }
 
+/// The env var each catalog provider reads its key from, if one is set. A cold
+/// catalog gives nothing, because a fetch here would stall every spawn.
+pub(crate) fn key_vars_if_available() -> Vec<String> {
+    let Some(Ok(guard)) = SHARED_CATALOG.get().map(|catalog| catalog.lock()) else {
+        return Vec::new();
+    };
+    guard
+        .providers
+        .values()
+        .filter_map(ProviderData::env_key_set)
+        .map(str::to_owned)
+        .collect()
+}
+
 /// Non-blocking availability check for catalog-backed providers: true only when
 /// the catalog is already warm, contains the slug, and auth resolves (API key or
 /// free access). Never triggers a fetch, unlike [`try_create`].

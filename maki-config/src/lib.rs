@@ -282,6 +282,14 @@ pub fn expand_env(value: &str) -> Result<String, String> {
     Ok(out)
 }
 
+/// The variable names [`expand_env`] would look up in `value`.
+pub fn env_var_refs(value: &str) -> impl Iterator<Item = &str> {
+    value
+        .split("${")
+        .skip(1)
+        .filter_map(|part| part.split_once('}').map(|(var, _)| var))
+}
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("invalid config: {section}.{field} = {value} is below minimum ({min})")]
@@ -4464,6 +4472,13 @@ mod tests {
             expand_env("x ${NOT_CLOSED").as_deref(),
             Ok("x ${NOT_CLOSED")
         );
+    }
+
+    #[test_case("plain value", &[] ; "no_refs")]
+    #[test_case("Bearer ${A}-${B}!", &["A", "B"] ; "every_ref")]
+    #[test_case("${A} ${NOT_CLOSED", &["A"] ; "unterminated_skipped")]
+    fn env_var_refs_names(value: &str, expected: &[&str]) {
+        assert_eq!(env_var_refs(value).collect::<Vec<_>>(), expected);
     }
 
     #[test]
