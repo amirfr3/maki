@@ -35,19 +35,21 @@ case("truncate_exceeds_line_limit", function()
   assert(result:find("%[truncated %d+ bytes%]"), "should have truncation marker")
 end)
 
-case("truncate_exceeds_byte_limit", function()
-  local text = string.rep("x", 200)
-  local result = truncate(text, 1000, 50)
-  assert(#result < #text, "should be shorter")
-  assert(result:find("%[truncated"), "should have truncation marker")
+local function truncated(kept, dropped_bytes)
+  return kept .. "\n\n[truncated " .. dropped_bytes .. " bytes]"
+end
+
+case("truncate_single_oversized_line_keeps_prefix", function()
+  eq(truncate(string.rep("x", 200), 1000, 50), truncated(string.rep("x", 50), 150))
 end)
 
-case("truncate_byte_limit_mid_line", function()
-  local text = "short\n" .. string.rep("x", 100)
-  local result = truncate(text, 1000, 20)
-  assert(result:find("short"), "should keep first line")
-  assert(not result:find(string.rep("x", 100)), "should drop long line")
-  assert(result:find("%[truncated"), "should have truncation marker")
+case("truncate_oversized_line_after_kept_lines_is_dropped", function()
+  local text = "short\n" .. string.rep("x", 100) .. "\nlast"
+  eq(truncate(text, 1000, 20), truncated("short", 106))
+end)
+
+case("truncate_oversized_line_cuts_on_utf8_boundary", function()
+  eq(truncate(string.rep("é", 10), 1000, 5), truncated("éé", 16))
 end)
 
 case("truncate_trailing_newlines_counted", function()
