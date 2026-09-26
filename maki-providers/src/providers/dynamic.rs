@@ -16,6 +16,7 @@ use tracing::{debug, warn};
 use crate::model::{Model, ModelPricing, ModelTier, ThinkingSupport};
 use crate::provider::{BoxFuture, Provider};
 use crate::spec::{ProviderRegistry, ProviderSpec};
+use crate::strip_provider_keys;
 use crate::types::ThinkingFields;
 use crate::{AgentError, Message, ProviderEvent, ProviderUsage, RequestOptions, StreamResponse};
 
@@ -152,7 +153,7 @@ fn providers_dir() -> Option<PathBuf> {
 }
 
 fn run_script(path: &Path, subcommand: &str, timeout: Duration) -> Result<String, AgentError> {
-    let mut child = Command::new(path)
+    let mut child = strip_provider_keys(&mut Command::new(path))
         .arg(subcommand)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -213,7 +214,7 @@ fn run_script(path: &Path, subcommand: &str, timeout: Duration) -> Result<String
 /// error right after logging in.
 fn run_script_interactive(path: &Path, subcommand: &str) -> Result<(), AgentError> {
     let _lock = lock_exclusive(path);
-    let status = Command::new(path)
+    let status = strip_provider_keys(&mut Command::new(path))
         .arg(subcommand)
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())

@@ -45,6 +45,10 @@ headers = { Authorization = "Bearer ${ANALYTICS_TOKEN}" }
 referenced variable that is unset or empty fails that server with the variable
 named in its status, instead of sending a dangling `Bearer ` and getting a 401.
 
+Maki does not pass provider API keys such as `ANTHROPIC_API_KEY` to the
+processes it starts, so a stdio server that needs one gets it through
+`environment = { ANTHROPIC_API_KEY = "${ANTHROPIC_API_KEY}" }`.
+
 Some HTTP servers need OAuth but have no dynamic client registration. For those, give Maki a static client:
 
 ```toml

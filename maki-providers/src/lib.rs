@@ -1,3 +1,4 @@
+mod child_env;
 pub(crate) mod error;
 pub(crate) mod image;
 pub(crate) mod manifest;
@@ -11,6 +12,7 @@ pub mod spec;
 pub mod tokens;
 pub(crate) mod types;
 
+pub use child_env::strip_provider_keys;
 pub use error::{AgentError, Overflow};
 pub use maki_storage::sessions::add_cost;
 pub use model::{
