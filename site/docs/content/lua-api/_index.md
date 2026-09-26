@@ -3141,6 +3141,13 @@ Requires the `run` [plugin permission](#plugin-permissions).
   - `tools` (`table?`) map of `name -> function` for tools the sandbox may call.
     Each function receives the tool input table and must return `(string)` or
     `(nil, err)`. Tool calls are batched and dispatched concurrently.
+  - `files` (`table?`) serves text file access from `open()` and `pathlib`.
+    `read(path)` returns `(content)`, `write(path, content, append)` returns
+    `(string)`, and both return `(nil, err)` on failure. Leave one out to
+    refuse that access. Writes wait and go out as one `write` per file right
+    before a tool call, a read of that path, or the end of the run, and a
+    cancelled run drops the ones still waiting. A failed write ends the run,
+    unless a read sent it, then it raises `OSError` just like a failed read.
 
 **Returns:** (`table`, `string?`) Result table, plus an error string on failure.
 
