@@ -257,6 +257,35 @@ fn declared_specs_from(config: &ProvidersConfig) -> Vec<String> {
     specs
 }
 
+/// Models a custom provider can start on: its own `default_model`, then one
+/// declared model per tier. Never the protocol's default model, because a local
+/// server or proxy rarely serves it. Sorted by slug, since `providers.toml` is a
+/// map and startup should pick the same provider every run.
+pub fn startup_specs(tiers: &[ModelTier]) -> Vec<String> {
+    startup_specs_from(&ProvidersConfig::load(), tiers)
+}
+
+fn startup_specs_from(config: &ProvidersConfig, tiers: &[ModelTier]) -> Vec<String> {
+    let mut entries: Vec<_> = config
+        .providers
+        .iter()
+        .filter(|(slug, def)| !is_builtin_slug(slug) && def.protocol.is_some())
+        .collect();
+    entries.sort_unstable_by_key(|(slug, _)| *slug);
+    entries
+        .into_iter()
+        .flat_map(|(slug, def)| {
+            let declared = tiers.iter().filter_map(move |&tier| {
+                def.models
+                    .iter()
+                    .find(|m| ModelTier::from(m.tier) == tier)
+                    .map(|m| format!("{slug}/{}", m.id))
+            });
+            def.default_model.clone().into_iter().chain(declared)
+        })
+        .collect()
+}
+
 /// Outcome of resolving a tier against `providers.toml` in a single read.
 pub enum TierLookup {
     Model(Model),
@@ -409,6 +438,7 @@ mod tests {
 
     const FIELDS_MODEL: &str =
         r#"{"id":"m","thinking_fields":{"high":{"reasoning_effort":"xhigh"}}}"#;
+    const STARTUP_TIERS: [ModelTier; 2] = [ModelTier::Strong, ModelTier::Medium];
 
     fn openai_spec() -> &'static ProviderSpec {
         ProviderRegistry::get(super::super::openai::SLUG).unwrap()
@@ -445,6 +475,28 @@ mod tests {
         // Resolution owns the builtin slug regardless of the providers.toml entry.
         let model = Model::from_spec("opencode/shadow-model").unwrap();
         assert_eq!(model.provider.as_ref(), "opencode");
+    }
+
+    #[test_case("[localai]", &[] ; "entry_without_protocol_is_skipped")]
+    #[test_case("[openai]\nprotocol = \"openai\"\ndefault_model = \"openai/gpt-5\"", &[] ; "builtin_slug_is_skipped")]
+    #[test_case("[local]\nprotocol = \"openai\"\ndiscover_models = true", &[] ; "protocol_default_is_never_guessed")]
+    #[test_case(
+        "[local]\nprotocol = \"openai\"\ndefault_model = \"local/picked\"\n\
+         [[local.models]]\nid = \"small\"\ntier = \"weak\"\n\
+         [[local.models]]\nid = \"mid\"\n\
+         [[local.models]]\nid = \"big\"\ntier = \"strong\"",
+        &["local/picked", "local/big", "local/mid"]
+        ; "default_model_then_declared_by_tier"
+    )]
+    #[test_case(
+        "[zeta]\nprotocol = \"openai\"\ndefault_model = \"zeta/z\"\n\
+         [alpha]\nprotocol = \"anthropic\"\ndefault_model = \"alpha/a\"",
+        &["alpha/a", "zeta/z"]
+        ; "providers_come_in_slug_order"
+    )]
+    fn startup_specs_only_name_models_the_user_declared(toml_src: &str, expected: &[&str]) {
+        let config: ProvidersConfig = toml::from_str(toml_src).unwrap();
+        assert_eq!(startup_specs_from(&config, &STARTUP_TIERS), expected);
     }
 
     // The exact regression this fixes: discovery parsed context_window but

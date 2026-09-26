@@ -6,7 +6,9 @@ use color_eyre::Result;
 use color_eyre::eyre::{Context, eyre};
 
 use maki_providers::model::{Model, ModelError, ModelTier};
+use maki_providers::provider::provider_available;
 use maki_providers::spec::ProviderRegistry;
+use maki_providers::{custom, dynamic};
 use maki_storage::StateDir;
 use maki_storage::log::RotatingFileWriter;
 use maki_storage::model::read_model;
@@ -28,6 +30,7 @@ const PROVIDER_PRIORITY: &[&str] = &[
     "deepseek",
     "regolo",
 ];
+const STARTUP_TIERS: [ModelTier; 2] = [ModelTier::Strong, ModelTier::Medium];
 
 pub fn resolve_model(
     explicit: Option<&str>,
@@ -46,6 +49,7 @@ pub fn resolve_model(
     if let Some(spec) = read_model(storage) {
         if policy.allows(&spec)
             && let Ok(m) = from_spec_or_warm_catalog(&spec)
+            && provider_available(&m.provider)
         {
             return Ok(m);
         }
@@ -88,9 +92,9 @@ fn from_spec_or_warm_catalog(spec: &str) -> Result<Model, ModelError> {
 }
 
 fn auto_detect_model(policy: &maki_config::ModelPolicy) -> Option<Model> {
-    for tier in [ModelTier::Strong, ModelTier::Medium] {
+    for tier in STARTUP_TIERS {
         for &slug in PROVIDER_PRIORITY {
-            if maki_providers::provider::provider_available(slug)
+            if provider_available(slug)
                 && let Ok(model) = Model::from_tier(slug, tier)
                 && policy.allows(&model.spec())
             {
@@ -98,7 +102,20 @@ fn auto_detect_model(policy: &maki_config::ModelPolicy) -> Option<Model> {
             }
         }
     }
-    None
+    user_provider_models()
+        .find(|model| policy.allows(&model.spec()) && provider_available(&model.provider))
+}
+
+/// Scripts in `providers/`, then `providers.toml` entries. They come after the
+/// built-ins so a key in the environment still wins, as it always did.
+fn user_provider_models() -> impl Iterator<Item = Model> {
+    let scripts = dynamic::discovered_slugs()
+        .into_iter()
+        .flat_map(|slug| STARTUP_TIERS.map(|tier| Model::from_tier_dynamic(slug, tier)));
+    let custom = custom::startup_specs(&STARTUP_TIERS)
+        .into_iter()
+        .map(|spec| Model::from_spec(&spec));
+    scripts.chain(custom).filter_map(Result::ok)
 }
 
 /// Built-in slugs keep their compiled protocol, model catalog and auth wiring,

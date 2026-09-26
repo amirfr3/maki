@@ -25,6 +25,7 @@ pub use providers::catalog::{
     catalog_providers_if_available, refresh_catalog, warm_catalog,
 };
 pub use providers::copilot::auth as copilot_auth;
+pub use providers::custom;
 pub use providers::dynamic;
 pub use providers::openai::auth as openai_auth;
 pub use providers::xai::auth as xai_auth;
