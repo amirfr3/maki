@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -6,7 +7,7 @@ use std::time::{Duration, Instant};
 use async_lock::Mutex;
 use futures_lite::AsyncReadExt;
 use isahc::HttpClient;
-use isahc::config::{Configurable, RedirectPolicy, VersionNegotiation};
+use isahc::config::{CaCertificate, Configurable, RedirectPolicy, VersionNegotiation};
 use isahc::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use isahc::http::{Method, Request, StatusCode, header::HeaderMap};
 use maki_storage::StateDir;
@@ -19,7 +20,7 @@ use super::protocol::{JsonRpcError, JsonRpcNotification, JsonRpcRequest};
 use super::transport::{BoxFuture, McpTransport};
 use tracing::{info, warn};
 
-pub(super) const MAX_REDIRECTS: u32 = 10;
+const MAX_REDIRECTS: u32 = 10;
 const SESSION_HEADER: &str = "mcp-session-id";
 const PROTOCOL_HEADER: &str = "mcp-protocol-version";
 const INITIALIZE_METHOD: &str = "initialize";
@@ -35,6 +36,7 @@ pub struct HttpTransport {
     headers: HashMap<String, String>,
     auth: Mutex<Option<String>>,
     storage: Option<StateDir>,
+    ca_file: Option<PathBuf>,
     negotiated: Mutex<Negotiated>,
     next_id: AtomicU64,
 }
@@ -47,6 +49,25 @@ struct Negotiated {
     protocol_version: Option<String>,
 }
 
+/// Shared by the transport and its OAuth flows, so both reach a server the same way.
+pub(super) fn build_client(
+    timeout: Duration,
+    ca_file: Option<&Path>,
+) -> Result<HttpClient, isahc::Error> {
+    let builder = HttpClient::builder()
+        .redirect_policy(RedirectPolicy::Limit(MAX_REDIRECTS))
+        // The workspace enables curl's http2 feature for OTLP over gRPC,
+        // which would otherwise flip this transport to h2 over TLS. Its
+        // streaming responses are tuned for HTTP/1.1, so pin it.
+        .version_negotiation(VersionNegotiation::http11())
+        .timeout(timeout);
+    match ca_file {
+        Some(path) => builder.ssl_ca_certificate(CaCertificate::file(path)),
+        None => builder,
+    }
+    .build()
+}
+
 impl HttpTransport {
     pub fn new(
         name: &str,
@@ -54,16 +75,10 @@ impl HttpTransport {
         headers: &HashMap<String, String>,
         timeout: Duration,
         storage: Option<StateDir>,
+        ca_file: Option<&Path>,
     ) -> Result<Self, McpError> {
-        let client = HttpClient::builder()
-            .redirect_policy(RedirectPolicy::Limit(MAX_REDIRECTS))
-            // The workspace enables curl's http2 feature for OTLP over gRPC,
-            // which would otherwise flip this transport to h2 over TLS. Its
-            // streaming responses are tuned for HTTP/1.1, so pin it.
-            .version_negotiation(VersionNegotiation::http11())
-            .timeout(timeout)
-            .build()
-            .map_err(|e: isahc::Error| McpError::StartFailed {
+        let client =
+            build_client(timeout, ca_file).map_err(|e: isahc::Error| McpError::StartFailed {
                 server: name.into(),
                 reason: e.to_string(),
             })?;
@@ -86,6 +101,7 @@ impl HttpTransport {
             headers,
             auth: Mutex::new(auth),
             storage,
+            ca_file: ca_file.map(Path::to_path_buf),
             negotiated: Mutex::new(Negotiated::default()),
             next_id: AtomicU64::new(1),
         })
@@ -193,7 +209,7 @@ impl HttpTransport {
             return guard.clone();
         }
 
-        match oauth::silent_refresh(storage, &self.name, &self.url).await {
+        match oauth::silent_refresh(storage, &self.name, &self.url, self.ca_file.as_deref()).await {
             Ok(Some(data)) => {
                 let header = format!("Bearer {}", data.tokens?.access);
                 *guard = Some(header.clone());
@@ -525,9 +541,15 @@ mod tests {
             }
         });
 
-        let transport =
-            HttpTransport::new("srv", &url, &HashMap::new(), PENDING_REQUEST_TIMEOUT, None)
-                .unwrap();
+        let transport = HttpTransport::new(
+            "srv",
+            &url,
+            &HashMap::new(),
+            PENDING_REQUEST_TIMEOUT,
+            None,
+            None,
+        )
+        .unwrap();
         smol::block_on(async {
             let pending: BoxFuture<'_, ()> = match operation {
                 PendingOperation::Request => Box::pin(async {
@@ -663,7 +685,7 @@ mod tests {
         headers: HashMap<String, String>,
         storage: Option<StateDir>,
     ) -> HttpTransport {
-        HttpTransport::new("srv", url, &headers, TRANSPORT_TIMEOUT, storage).unwrap()
+        HttpTransport::new("srv", url, &headers, TRANSPORT_TIMEOUT, storage, None).unwrap()
     }
 
     fn oauth_routes(base: &str, req: &Req) -> Option<(u16, String)> {

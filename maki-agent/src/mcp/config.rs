@@ -6,6 +6,7 @@ use std::time::Duration;
 use super::error::McpError;
 use crate::tools::is_builtin_tool;
 use maki_config::{GatedFile, ProjectConfig, expand_env, is_valid_server_name};
+use maki_storage::paths::expand_tilde;
 use serde::Deserialize;
 use toml_edit::DocumentMut;
 
@@ -121,6 +122,7 @@ pub struct McpServerInfo {
     pub config_path: PathBuf,
     pub url: Option<String>,
     pub oauth: Option<OauthClientConfig>,
+    pub ca_file: Option<PathBuf>,
 }
 
 #[derive(Deserialize, Default)]
@@ -181,6 +183,10 @@ pub struct RawHttpFields {
     pub headers: HashMap<String, String>,
     #[serde(default)]
     pub oauth: Option<OauthClientConfig>,
+    /// PEM bundle that replaces the default CAs for this server and its OAuth
+    /// endpoints. `read_config` makes it absolute.
+    #[serde(default)]
+    pub ca_file: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -221,6 +227,7 @@ pub enum Transport {
         url: String,
         headers: HashMap<String, String>,
         oauth: Option<OauthClientConfig>,
+        ca_file: Option<PathBuf>,
     },
 }
 
@@ -255,6 +262,8 @@ impl McpConfig {
                         RawTransport::Http(h) => h.oauth.clone(),
                         _ => None,
                     },
+                    // The raw path is not resolved yet, and OAuth only starts from published infos.
+                    ca_file: None,
                 }
             })
             .collect()
@@ -321,10 +330,19 @@ pub fn parse_server(name: String, server: RawServerConfig) -> Result<ServerConfi
                     "server '{name}' oauth.callback_path must start with '/'"
                 )));
             }
+            if let Some(path) = &cfg.ca_file
+                && !path.is_file()
+            {
+                return Err(McpError::Config(format!(
+                    "server '{name}' ca_file '{}' is not a file",
+                    path.display()
+                )));
+            }
             Transport::Http {
                 url: cfg.url,
                 headers: expand_map(&name, "header", cfg.headers)?,
                 oauth: cfg.oauth,
+                ca_file: cfg.ca_file,
             }
         }
     };
@@ -454,7 +472,22 @@ fn read_config(path: &Path) -> Result<Option<McpConfig>, McpConfigError> {
             path: path.into(),
             error: e.to_string(),
         })
-        .map(Some)
+        .map(|mut cfg| {
+            resolve_ca_files(&mut cfg, path);
+            Some(cfg)
+        })
+}
+
+/// Relative to the `mcp.toml` that names it, so a global config works from any cwd.
+fn resolve_ca_files(config: &mut McpConfig, config_path: &Path) {
+    let base = config_path.parent().unwrap_or(Path::new(""));
+    for server in config.mcp.values_mut() {
+        if let RawTransport::Http(http) = &mut server.transport
+            && let Some(ca_file) = &mut http.ca_file
+        {
+            *ca_file = base.join(expand_tilde(ca_file));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -483,6 +516,7 @@ mod tests {
                 url: url.to_string(),
                 headers: HashMap::new(),
                 oauth: None,
+                ca_file: None,
             }),
         }
     }
@@ -683,6 +717,72 @@ oauth = { client_id = "acme-client", client_secret = "s3cret", callback_port = 3
         .unwrap();
         let err = parse_server("acme".into(), config.mcp["acme"].clone()).unwrap_err();
         assert!(err.to_string().contains("callback_path"));
+    }
+
+    fn http_raw_with_ca(ca_file: PathBuf) -> RawServerConfig {
+        let mut cfg = http_raw("https://mcp.example.com/mcp");
+        if let RawTransport::Http(http) = &mut cfg.transport {
+            http.ca_file = Some(ca_file);
+        }
+        cfg
+    }
+
+    #[test]
+    fn existing_ca_file_reaches_the_transport() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca_file = dir.path().join("ca.pem");
+        fs::write(&ca_file, "").unwrap();
+        let parsed = parse_server("srv".into(), http_raw_with_ca(ca_file.clone())).unwrap();
+        match parsed.transport {
+            Transport::Http { ca_file: got, .. } => assert_eq!(got, Some(ca_file)),
+            _ => panic!("expected Http"),
+        }
+    }
+
+    #[test_case("missing.pem" ; "missing_file")]
+    #[test_case(""            ; "directory")]
+    fn ca_file_that_is_not_a_file_fails_the_server(file_name: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let err =
+            parse_server("srv".into(), http_raw_with_ca(dir.path().join(file_name))).unwrap_err();
+        assert!(err.to_string().contains("ca_file"), "got: {err}");
+    }
+
+    #[test]
+    fn read_config_resolves_ca_file_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join("config");
+        fs::create_dir(&config_dir).unwrap();
+        let absolute = dir.path().join("shared.pem");
+        let path = config_dir.join(MCP_CONFIG_FILE);
+        fs::write(
+            &path,
+            format!(
+                r#"[mcp.relative]
+url = "https://a.example.com/mcp"
+ca_file = "certs/ca.pem"
+
+[mcp.home]
+url = "https://b.example.com/mcp"
+ca_file = "~/ca.pem"
+
+[mcp.absolute]
+url = "https://c.example.com/mcp"
+ca_file = '{}'
+"#,
+                absolute.display()
+            ),
+        )
+        .unwrap();
+
+        let cfg = read_config(&path).unwrap().unwrap();
+        let ca_file = |name: &str| match &cfg.mcp[name].transport {
+            RawTransport::Http(http) => http.ca_file.clone().unwrap(),
+            RawTransport::Stdio(_) => panic!("expected Http"),
+        };
+        assert_eq!(ca_file("relative"), config_dir.join("certs/ca.pem"));
+        assert_eq!(ca_file("home"), expand_tilde(Path::new("~/ca.pem")));
+        assert_eq!(ca_file("absolute"), absolute);
     }
 
     #[test]

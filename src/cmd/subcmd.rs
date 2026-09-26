@@ -601,11 +601,16 @@ pub fn mcp_auth(server: &str, storage: &StateDir, trust_mode: TrustMode) -> Resu
             .mcp
             .get(server)
             .ok_or_else(|| color_eyre::eyre::eyre!("unknown MCP server: {server}"))?;
-        let (url, oauth) = match mcp_config::parse_server(server.to_owned(), raw.clone())?.transport
-        {
-            mcp_config::Transport::Http { url, oauth, .. } => (url, oauth),
-            _ => color_eyre::eyre::bail!("server '{server}' is not an HTTP transport"),
-        };
+        let (url, oauth, ca_file) =
+            match mcp_config::parse_server(server.to_owned(), raw.clone())?.transport {
+                mcp_config::Transport::Http {
+                    url,
+                    oauth,
+                    ca_file,
+                    ..
+                } => (url, oauth, ca_file),
+                _ => color_eyre::eyre::bail!("server '{server}' is not an HTTP transport"),
+            };
         mcp_oauth::authenticate(
             server,
             &url,
@@ -613,6 +618,7 @@ pub fn mcp_auth(server: &str, storage: &StateDir, trust_mode: TrustMode) -> Resu
             storage,
             mcp_oauth::Interaction::Cli,
             oauth,
+            ca_file.as_deref(),
         )
         .await?;
         eprintln!("Successfully authenticated with MCP server '{server}'");
