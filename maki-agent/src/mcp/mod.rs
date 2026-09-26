@@ -954,7 +954,7 @@ fn parse_entries(config: McpConfig) -> McpManagerInner {
         let transport_kind = transport_kind(&raw.transport);
         let origin = origins.get(&name).cloned().unwrap_or_default();
         let disabled = !raw.enabled;
-        let (config, status) = match parse_server(name.clone(), raw) {
+        let (config, status) = match parse_server(name.clone(), raw, &origin) {
             Ok(sc) if disabled => (Some(sc), McpServerStatus::Disabled),
             Ok(sc) => (Some(sc), McpServerStatus::Connecting),
             Err(e) => {
@@ -1311,7 +1311,7 @@ fn intern(name: String) -> Arc<str> {
 mod tests {
     use super::*;
     use async_lock::Mutex as AsyncMutex;
-    use config::{RawServerConfig, RawStdioFields, RawTransport};
+    use config::{RawHttpFields, RawServerConfig, RawStdioFields, RawTransport};
     use maki_providers::Role;
     use std::sync::atomic::{AtomicUsize, Ordering};
     #[cfg(unix)]
@@ -1320,6 +1320,7 @@ mod tests {
 
     const DEFAULT_TIMEOUT_MS: u64 = 30_000;
     const MISSING_PROGRAM: &str = "/nonexistent/definitely-not-here";
+    const MISSING_CA_FILE: &str = "/nonexistent/ca.pem";
 
     fn stdio_raw(cmd: &[&str]) -> RawServerConfig {
         RawServerConfig {
@@ -1484,11 +1485,24 @@ mod tests {
         assert_eq!(names, vec!["alpha", "mid", "zeta"]);
     }
 
+    #[test]
+    fn disabled_server_with_missing_ca_file_stays_disabled() {
+        let mut raw = RawServerConfig::runtime(RawTransport::Http(RawHttpFields {
+            url: "https://mcp.example.com/mcp".into(),
+            headers: HashMap::new(),
+            oauth: None,
+            ca_file: Some(MISSING_CA_FILE.into()),
+        }));
+        raw.enabled = false;
+        let inner = parse_entries(make_config(vec![("srv", raw)]));
+        assert_eq!(inner.entries[0].status, McpServerStatus::Disabled);
+    }
+
     fn always_load_entry(name: &str, transport: Arc<dyn McpTransport>) -> ServerEntry {
         let mut raw = stdio_raw(&["echo"]);
         raw.always_load = true;
         let mut entry = fake_entry(name, transport);
-        entry.config = Some(parse_server(name.into(), raw).unwrap());
+        entry.config = Some(parse_server(name.into(), raw, Path::new("")).unwrap());
         entry
     }
 

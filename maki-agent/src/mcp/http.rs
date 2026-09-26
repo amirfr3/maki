@@ -49,11 +49,15 @@ struct Negotiated {
     protocol_version: Option<String>,
 }
 
-/// Shared by the transport and its OAuth flows, so both reach a server the same way.
+/// The transport and OAuth both build their client here, so they reach a server the same way.
+///
+/// We check `ca_file` here and not while parsing the config, so a disabled server with a
+/// missing bundle still shows as disabled. Without the check, a missing file would only
+/// show up on the first request, as a confusing TLS error.
 pub(super) fn build_client(
     timeout: Duration,
     ca_file: Option<&Path>,
-) -> Result<HttpClient, isahc::Error> {
+) -> Result<HttpClient, String> {
     let builder = HttpClient::builder()
         .redirect_policy(RedirectPolicy::Limit(MAX_REDIRECTS))
         // The workspace enables curl's http2 feature for OTLP over gRPC,
@@ -61,11 +65,14 @@ pub(super) fn build_client(
         // streaming responses are tuned for HTTP/1.1, so pin it.
         .version_negotiation(VersionNegotiation::http11())
         .timeout(timeout);
-    match ca_file {
+    let builder = match ca_file {
+        Some(path) if !path.is_file() => {
+            return Err(format!("ca_file '{}' is not a file", path.display()));
+        }
         Some(path) => builder.ssl_ca_certificate(CaCertificate::file(path)),
         None => builder,
-    }
-    .build()
+    };
+    builder.build().map_err(|e| e.to_string())
 }
 
 impl HttpTransport {
@@ -77,11 +84,10 @@ impl HttpTransport {
         storage: Option<StateDir>,
         ca_file: Option<&Path>,
     ) -> Result<Self, McpError> {
-        let client =
-            build_client(timeout, ca_file).map_err(|e: isahc::Error| McpError::StartFailed {
-                server: name.into(),
-                reason: e.to_string(),
-            })?;
+        let client = build_client(timeout, ca_file).map_err(|reason| McpError::StartFailed {
+            server: name.into(),
+            reason,
+        })?;
 
         let mut headers = headers.clone();
         let auth = headers
@@ -686,6 +692,27 @@ mod tests {
         storage: Option<StateDir>,
     ) -> HttpTransport {
         HttpTransport::new("srv", url, &headers, TRANSPORT_TIMEOUT, storage, None).unwrap()
+    }
+
+    #[test_case("missing.pem" ; "missing_file")]
+    #[test_case(""            ; "directory")]
+    fn ca_file_that_is_not_a_file_fails_the_start(file_name: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let ca_file = dir.path().join(file_name);
+        let Err(McpError::StartFailed { reason, .. }) = HttpTransport::new(
+            "srv",
+            "http://127.0.0.1:1/mcp",
+            &HashMap::new(),
+            TRANSPORT_TIMEOUT,
+            None,
+            Some(&ca_file),
+        ) else {
+            panic!("expected StartFailed");
+        };
+        assert!(
+            reason.contains(&ca_file.display().to_string()),
+            "got: {reason}"
+        );
     }
 
     fn oauth_routes(base: &str, req: &Req) -> Option<(u16, String)> {

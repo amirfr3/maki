@@ -61,7 +61,7 @@ url = "https://mcp.corp.example.com/mcp"
 ca_file = "~/certs/corp-ca.pem"
 ```
 
-Maki ships its own OpenSSL, which does not read the macOS keychain or the Windows certificate store. The bundle replaces the default CAs for this server and its OAuth endpoints. If OAuth goes through a public provider, add the public CAs to the bundle too, for example `cat /etc/ssl/cert.pem corp-ca.pem > bundle.pem`. A relative path starts from the folder of the `mcp.toml` that sets it. To trust a CA for every HTTPS request Maki makes, set `SSL_CERT_FILE` instead, to a bundle that holds the public CAs as well.
+On macOS, Maki uses its own OpenSSL, which does not read the keychain. The bundle replaces the default CAs for this server and its OAuth endpoints. If OAuth goes through a public provider, add the public CAs to the bundle too, for example `cat /etc/ssl/cert.pem corp-ca.pem > bundle.pem`. The path expands `${VAR}` and `~`, and a relative path starts from the folder of the `mcp.toml` that sets it. On macOS and Linux, you can instead trust a CA for every HTTPS request Maki makes by pointing `SSL_CERT_FILE` at a bundle that holds the public CAs as well.
 
 ### All options
 

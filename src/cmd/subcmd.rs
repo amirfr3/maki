@@ -601,8 +601,9 @@ pub fn mcp_auth(server: &str, storage: &StateDir, trust_mode: TrustMode) -> Resu
             .mcp
             .get(server)
             .ok_or_else(|| color_eyre::eyre::eyre!("unknown MCP server: {server}"))?;
+        let origin = config.origins.get(server).cloned().unwrap_or_default();
         let (url, oauth, ca_file) =
-            match mcp_config::parse_server(server.to_owned(), raw.clone())?.transport {
+            match mcp_config::parse_server(server.to_owned(), raw.clone(), &origin)?.transport {
                 mcp_config::Transport::Http {
                     url,
                     oauth,
