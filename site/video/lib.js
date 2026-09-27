@@ -122,7 +122,24 @@ export function words(parent, cls, html, x, y, w) {
   return { node, words: splitWords(node) };
 }
 
+// a block that sits under another, whose height is known only once it is laid out
+export function follow(block, head, gap) {
+  block.follow = [head, gap];
+  return block;
+}
+
+// text wraps a little differently at each zoom, so followers measure again after a resize
+let layoutEpoch = 0;
+export const relayout = () => layoutEpoch++;
+
 export function showWords(block, t, a, b, { stagger = 0.035, dur = 0.7, out = 0.45, lift = 16 } = {}) {
+  if (block.follow && block.placed !== layoutEpoch) {
+    const [head, gap] = block.follow;
+    if (head.node.offsetHeight) {
+      block.node.style.top = head.node.offsetTop + head.node.offsetHeight + gap + 'px';
+      block.placed = layoutEpoch;
+    }
+  }
   const o = t < a || t > b ? 0 : 1 - prog(t, b - out, out, ease.in);
   style(block.node, o, 0, -lift * prog(t, b - out, out, ease.in));
   if (o > 0) revealWords(block.words, t, a, stagger, dur);

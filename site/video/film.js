@@ -1,15 +1,18 @@
 import { buildFilm } from './scenes.js';
 import { clamp, fmt } from './lib.js';
 
-const STAGE_W = 1920;
-const STAGE_H = 1080;
 const SEEK_STEP = 5;
 const FRAME = 1 / 60;
 const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2];
 const MSG_MS = 2600;
+const CONTROLS_MS = 2400;
+// the head script picks the first cut with the same query
+const TALL_QUERY = '(max-aspect-ratio: 4/5)';
+const SHORT_QUERY = '(orientation: landscape) and (max-height: 540px)';
 
 const root = document.documentElement;
 const exporting = root.classList.contains('export');
+const viewer = document.getElementById('viewer');
 const frame = document.getElementById('frame');
 const stage = document.getElementById('stage');
 const player = document.getElementById('player');
@@ -25,7 +28,10 @@ const cmdline = document.getElementById('cmdline');
 const cmd = document.getElementById('cmd');
 const cmdMsg = document.getElementById('cmd-msg');
 
-const film = buildFilm(stage, { exporting });
+const tallQuery = matchMedia(TALL_QUERY);
+const shortQuery = matchMedia(SHORT_QUERY);
+// both cuts share one timeline, so duration and chapters hold across a rebuild
+let film = buildFilm(stage, { exporting, portrait: root.classList.contains('tall') });
 const { duration, chapters } = film;
 
 let t = 0;
@@ -40,13 +46,23 @@ function fit() {
     film.resize(1);
     return;
   }
-  const full = document.fullscreenElement === frame;
-  const w = full ? innerWidth : frame.clientWidth;
-  const h = full ? innerHeight : frame.clientHeight;
-  const zoom = Math.min(w / STAGE_W, h / STAGE_H);
+  const immersive = document.fullscreenElement === viewer || viewer.classList.contains('theater');
+  root.classList.toggle('overlay-ctl', immersive || root.classList.contains('tall') || shortQuery.matches);
+  const zoom = Math.min(frame.clientWidth / film.width, frame.clientHeight / film.height);
   stage.style.zoom = String(zoom);
-  if (!full) frame.style.height = '';
   film.resize(zoom);
+}
+
+function rebuild() {
+  const tall = tallQuery.matches;
+  if (exporting || tall === root.classList.contains('tall')) return;
+  root.classList.toggle('tall', tall);
+  film.dispose();
+  film = buildFilm(stage, { exporting, portrait: tall });
+  film.setSpeed(speed);
+  film.setPlaying(playing);
+  fit();
+  paint();
 }
 
 function chapterIndex(time) {
@@ -121,10 +137,24 @@ function toggleTheme() {
   paint();
 }
 
+function setTheater(on) {
+  viewer.classList.toggle('theater', on);
+  fit();
+}
+
+// iPhones have no element fullscreen, so the viewer covers the page instead
 function toggleFullscreen() {
   if (document.fullscreenElement) return document.exitFullscreen();
-  // phones hold the frame sideways; a refused lock just leaves it upright
-  frame.requestFullscreen?.().then(() => screen.orientation?.lock?.('landscape')).catch(() => {});
+  if (viewer.classList.contains('theater')) return setTheater(false);
+  if (viewer.requestFullscreen) viewer.requestFullscreen().catch(() => setTheater(true));
+  else setTheater(true);
+}
+
+let pokeTimer = 0;
+function poke() {
+  viewer.classList.add('poked');
+  clearTimeout(pokeTimer);
+  pokeTimer = setTimeout(() => viewer.classList.remove('poked'), CONTROLS_MS);
 }
 
 // ---------- ex commands ----------
@@ -214,7 +244,7 @@ document.addEventListener('keydown', e => {
     't': toggleTheme,
     '?': () => (keys.hidden = false),
     ':': openCmd,
-    'Escape': () => (cmdline.hidden = true),
+    'Escape': () => { cmdline.hidden = true; setTheater(false); },
   };
   if (/^[0-9]$/.test(k)) {
     seek((Number(k) / 10) * duration);
@@ -234,6 +264,8 @@ document.getElementById('fullscreen').addEventListener('click', toggleFullscreen
 document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
 document.getElementById('keys-open').addEventListener('click', () => (keys.hidden = false));
 keys.addEventListener('click', e => { if (e.target === keys) keys.hidden = true; });
+viewer.addEventListener('pointerdown', poke);
+viewer.addEventListener('pointermove', poke);
 speedBtn.addEventListener('click', () => setSpeed(SPEEDS[(SPEEDS.indexOf(speed) + 1) % SPEEDS.length]));
 
 function timeAt(e) {
@@ -242,24 +274,34 @@ function timeAt(e) {
 }
 let scrubbing = false;
 let resumeAfterScrub = false;
+function showTip(e) {
+  const at = timeAt(e);
+  const r = progress.getBoundingClientRect();
+  tip.textContent = `${fmt(at)}  ${chapters[chapterIndex(at)].title}`;
+  const half = tip.offsetWidth / 2;
+  tip.style.left = clamp(e.clientX - r.left, half, r.width - half) + 'px';
+  return at;
+}
 progress.addEventListener('pointerdown', e => {
   scrubbing = true;
   resumeAfterScrub = playing;
   setPlaying(false);
   progress.setPointerCapture(e.pointerId);
-  seek(timeAt(e));
+  progress.classList.add('scrub');
+  seek(showTip(e));
 });
 progress.addEventListener('pointermove', e => {
-  const at = timeAt(e);
-  const r = progress.getBoundingClientRect();
-  tip.style.left = clamp((e.clientX - r.left) / r.width) * 100 + '%';
-  tip.textContent = `${fmt(at)}  ${chapters[chapterIndex(at)].title}`;
+  const at = showTip(e);
   if (scrubbing) seek(at);
 });
-progress.addEventListener('pointerup', () => {
+const endScrub = () => {
+  if (!scrubbing) return;
   scrubbing = false;
+  progress.classList.remove('scrub');
   if (resumeAfterScrub) setPlaying(true);
-});
+};
+progress.addEventListener('pointerup', endScrub);
+progress.addEventListener('pointercancel', endScrub);
 
 for (const [i, ch] of chapters.entries()) {
   const tick = document.createElement('div');
@@ -289,6 +331,7 @@ function readHash() {
 addEventListener('hashchange', readHash);
 addEventListener('resize', fit);
 document.addEventListener('fullscreenchange', fit);
+tallQuery.addEventListener('change', rebuild);
 
 await document.fonts.ready;
 fit();

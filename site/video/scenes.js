@@ -1,13 +1,23 @@
 import {
-  clamp, lerp, ease, prog, win, rng, el, place, style, css, text, words, showWords, esc,
+  clamp, lerp, ease, prog, win, rng, el, place, style, css, text, words, follow, relayout, showWords, esc,
 } from './lib.js';
-import { Terminal } from './splash.js';
+import { Terminal, statusRight } from './splash.js';
 
-const W = 1920;
-const H = 1080;
-const CODE_LH = 29;
-const PANE_HEAD = 46;
-const PRE_PAD = 16;
+// one film at a time: these describe the stage it is being built for
+let W = 1920;
+let H = 1080;
+let P = false;
+let CODE_LH = 29;
+let PANE_HEAD = 46;
+let PRE_PAD = 16;
+
+const WIDE = { W: 1920, H: 1080, CODE_LH: 29, PANE_HEAD: 46, PRE_PAD: 16 };
+const TALL = { W: 1080, H: 1920, CODE_LH: 40, PANE_HEAD: 64, PRE_PAD: 20 };
+const M = 72;
+const CW = 936;
+
+// the wide value, or the tall one
+const L = (wide, tall) => (P ? tall : wide);
 
 // ---------------------------------------------------------------- shared bits
 
@@ -27,6 +37,12 @@ function pane(parent, x, y, w, h, label, right = '', cls = 'pane') {
   if (label != null) el('div', 'pane-label', node, `<b>${label}</b><span>${right}</span>`);
   const pre = el('pre', '', node);
   return { node, pre };
+}
+
+function codePane(parent, x, y, w, src, font, lh, label, right) {
+  const p = pane(parent, x, y, w, PANE_HEAD + PRE_PAD * 2 + src.length * lh, label, right);
+  Object.assign(p.pre.style, { lineHeight: lh + 'px', fontSize: font + 'px' });
+  return p;
 }
 
 function lines(pre, htmlLines, numbered = false, start = 1) {
@@ -66,7 +82,7 @@ function typeLines(lineEls, p, caret) {
 function caretFor(pre, fontPx) {
   const c = el('span', 'abs', pre);
   c._cw = fontPx * 0.6;
-  Object.assign(c.style, { width: c._cw + 'px', height: fontPx * 1.25 + 'px', background: 'currentColor', marginTop: '3px', opacity: 0 });
+  Object.assign(c.style, { width: c._cw + 'px', height: fontPx * 1.25 + 'px', background: 'currentColor', marginTop: '3px', opacity: 0, color: 'var(--t-ink)' });
   pre.style.position = 'relative';
   return c;
 }
@@ -85,15 +101,40 @@ function kTokens(k) {
   return Math.round(k) + 'k';
 }
 
+// every chapter opens on a headline and a line under it
+function title(node, html, wideW) {
+  return words(node, 'h1', html, L(96, M), L(124, 150), L(wideW, CW));
+}
+
+function sub(node, html, head, wideY, wideW = 1500, cls = 'lead sm') {
+  const block = words(node, cls, html, L(100, M), L(wideY, 0), L(wideW, CW));
+  return P ? follow(block, head, 20) : block;
+}
+
+// canvases size their backing store to the pixels they are shown at
+function fitCanvas(canvas, w, h, zoom) {
+  const pw = Math.round(w * zoom * devicePixelRatio);
+  const ph = Math.round(h * zoom * devicePixelRatio);
+  if (canvas.width !== pw || canvas.height !== ph) {
+    canvas.width = pw;
+    canvas.height = ph;
+  }
+  const g = canvas.getContext('2d');
+  g.setTransform(pw / w, 0, 0, ph / h, 0, 0);
+  g.clearRect(0, 0, w, h);
+  return g;
+}
+
 // ---------------------------------------------------------------- background
 
 function background(stage) {
   const root = el('div', 'layer', stage);
+  const [mx, my, ms] = L([1560, 120, 108], [860, 64, 100]);
   root.innerHTML = `
     <div class="layer" data-k="glow" style="background: radial-gradient(120% 90% at 20% 0%, var(--sky-1), transparent 60%)"></div>
     <div class="layer" data-k="sky" style="background: linear-gradient(180deg, var(--sky-1) 0%, var(--sky-2) 52%, var(--sky-3) 100%)"></div>
     <div class="layer" data-k="stars"></div>
-    <div class="abs" data-k="moon" style="left:1560px;top:120px;width:108px;height:108px;border-radius:50%;background:var(--moon-face);box-shadow:0 0 60px 18px var(--moon-glow), 0 0 160px 60px var(--moon-glow)"></div>
+    <div class="abs" data-k="moon" style="left:${mx}px;top:${my}px;width:${ms}px;height:${ms}px;border-radius:50%;background:var(--moon-face);box-shadow:0 0 60px 18px var(--moon-glow), 0 0 160px 60px var(--moon-glow)"></div>
     <div class="layer" data-k="clouds"></div>`;
   const $ = k => root.querySelector(`[data-k="${k}"]`);
   const r = rng(7);
@@ -111,16 +152,16 @@ function background(stage) {
     [160, 65, 'M5 65 Q0 48 16 42 Q8 26 30 20 Q38 4 58 6 Q75 -4 95 8 Q112 0 128 15 Q148 8 152 30 Q166 40 150 52 Q158 63 142 65Z'],
   ];
   const cloudSpec = [
-    [0, 1.7, 1080 - 176, 14, 'var(--cloud-deep)'],
-    [1, 1.5, 1080 - 150, -10, 'var(--cloud-deep)'],
-    [2, 2.0, 1080 - 110, 20, 'var(--cloud)'],
-    [0, 2.1, 1080 - 132, -16, 'var(--cloud)'],
-    [1, 1.7, 1080 - 96, 12, 'var(--cloud)'],
+    [0, 1.7, 176, 14, 'var(--cloud-deep)'],
+    [1, 1.5, 150, -10, 'var(--cloud-deep)'],
+    [2, 2.0, 110, 20, 'var(--cloud)'],
+    [0, 2.1, 132, -16, 'var(--cloud)'],
+    [1, 1.7, 96, 12, 'var(--cloud)'],
   ];
-  const clouds = cloudSpec.map(([shape, scale, y, speed, fill], i) => {
+  const clouds = cloudSpec.map(([shape, scale, fromBottom, speed, fill], i) => {
     const [vw, vh, d] = cloudPaths[shape];
     const svg = el('div', 'abs', $('clouds'), `<svg viewBox="0 0 ${vw} ${vh}" width="${vw * scale}" height="${vh * scale}" style="display:block"><path d="${d}" fill="${fill}"/></svg>`);
-    svg.style.top = y + 'px';
+    svg.style.top = H - fromBottom + 'px';
     svg._base = [-200 + i * 460, speed, vw * scale];
     return svg;
   });
@@ -142,7 +183,11 @@ function keyed(frames) {
 
 // ---------------------------------------------------------------- film
 
-export function buildFilm(stage, { exporting }) {
+export function buildFilm(stage, { exporting, portrait }) {
+  P = portrait;
+  ({ W, H, CODE_LH, PANE_HEAD, PRE_PAD } = P ? TALL : WIDE);
+  stage.classList.toggle('portrait', P);
+
   const bg = background(stage);
   const scenes = [];
   const chapters = [];
@@ -158,7 +203,7 @@ export function buildFilm(stage, { exporting }) {
     return s;
   };
 
-  const crumb = place(el('div', 'abs crumb', stage, '<b>maki</b><span></span>'), 96, 52);
+  const crumb = place(el('div', 'abs crumb', stage, '<b>maki</b><span></span>'), L(96, M), L(52, 64));
   const crumbText = crumb.lastChild;
   crumb.style.zIndex = 5;
 
@@ -166,18 +211,18 @@ export function buildFilm(stage, { exporting }) {
   threeCanvas.style.pointerEvents = 'none';
   let world = null;
   let worldReady = null;
+  let disposed = false;
+  let zoomNow = 1;
   const needWorld = () => {
-    if (!worldReady) {
-      worldReady = import('./world.js').then(m => {
-        world = new m.Staircase(threeCanvas, m.sessionItems(rng(11)));
-        world.mod = m;
-        world.resize(zoomNow * devicePixelRatio);
-        return world;
-      });
-    }
+    worldReady ??= import('./world.js').then(m => {
+      if (disposed) return null;
+      world = new m.Staircase(threeCanvas, m.sessionItems(rng(11)), W, H);
+      world.mod = m;
+      world.resize(zoomNow * devicePixelRatio);
+      return world;
+    });
     return worldReady;
   };
-  let zoomNow = 1;
 
   const ctx = { stage, bg, needWorld, getWorld: () => world, threeCanvas, exporting, assets: stage.dataset.assets ?? '../' };
 
@@ -206,6 +251,9 @@ export function buildFilm(stage, { exporting }) {
   const crumbOp = keyed([[0, 0], [scenes[2].start + 0.6, 0], [scenes[2].start + 1.4, 1], [OUT - 0.2, 1], [OUT + 0.6, 0]]);
 
   let crumbTitle = '';
+  let starCache = null;
+  const getStarOp = () => starCache ?? (starCache = getComputedStyle(document.documentElement).getPropertyValue('--star-op').trim() || '1');
+
   function render(t) {
     style(bg.$('sky'), skyOp(t));
     style(bg.$('glow'), glowOp(t));
@@ -226,8 +274,7 @@ export function buildFilm(stage, { exporting }) {
       }
     }
 
-    const co2 = crumbOp(t);
-    style(crumb, co2);
+    style(crumb, crumbOp(t));
     const ch = chapters.findLast(c => c.at <= t);
     const title = ch ? ch.title : '';
     if (title !== crumbTitle) {
@@ -247,16 +294,16 @@ export function buildFilm(stage, { exporting }) {
     style(threeCanvas, o3d);
   }
 
-  let starCache = null;
-  const getStarOp = () => starCache ?? (starCache = getComputedStyle(document.documentElement).getPropertyValue('--star-op').trim() || '1');
-
   const videos = scenes.flatMap(s => s.videos || []);
   return {
+    width: W,
+    height: H,
     duration,
     chapters,
     render,
     resize(zoom) {
       zoomNow = zoom;
+      relayout();
       for (const s of scenes) s.resize?.(zoom);
       world?.resize(zoom * devicePixelRatio);
     },
@@ -274,57 +321,64 @@ export function buildFilm(stage, { exporting }) {
       if (scenes.some(s => s.uses3d && t >= s.start - 2 && t < s.end)) await needWorld();
       for (const v of videos) await v.prepare(t);
     },
+    dispose() {
+      disposed = true;
+      world?.dispose();
+      for (const v of videos) v.dispose();
+      stage.replaceChildren();
+    },
   };
 }
 
 // ---------------------------------------------------------------- 1. splash
 
+const TERM_COLS = { wide: 96, tall: 60 };
+// the hero window keeps the stage's aspect, so the terminal shrinks into it without reflowing
+const HERO_WINDOW = { wide: [964, 262, 860, 484], tall: [360, 150, 360, 640] };
+
+function terminalFor(canvas) {
+  const cols = L(TERM_COLS.wide, TERM_COLS.tall);
+  return new Terminal(canvas, cols, Math.round(H / ((W / cols) * 2)));
+}
+
 function splashScene(ctx, start) {
   const node = scene(ctx.stage);
   node.style.zIndex = 3;
   const box = el('div', 'abs', node);
-  Object.assign(box.style, { left: 0, top: 0, width: W + 'px', height: H + 'px', overflow: 'hidden', transformOrigin: '0 0' });
+  Object.assign(box.style, { left: 0, top: 0, width: W + 'px', height: H + 'px', overflow: 'hidden' });
   const canvas = el('canvas', '', box);
   Object.assign(canvas.style, { width: '100%', height: '100%', display: 'block' });
-  const term = new Terminal(canvas);
+  const term = terminalFor(canvas);
   let zoom = 1;
 
-  const cap = words(node, 'note', 'the real splash screen, ported from <span style="color:#ffb86c">splash.rs</span>. in the terminal, LLVM vectorizes it to AVX', 40, 832, 1400);
-  Object.assign(cap.node.style, { color: '#c9cde0', fontSize: '22px', width: 'auto', padding: '8px 16px', borderRadius: '6px', background: 'rgba(24, 25, 34, 0.92)', border: '1px solid #44475a' });
+  const cap = words(node, 'note', 'the real splash screen, ported from <span style="color:#ffb86c">splash.rs</span>. in the terminal, LLVM vectorizes it to AVX', 40, L(832, 1520), L(1400, 1000));
+  Object.assign(cap.node.style, { color: '#c9cde0', fontSize: L(22, 30) + 'px', width: 'auto', maxWidth: L(1400, 1000) + 'px', padding: '8px 16px', borderRadius: '6px', background: 'rgba(24, 25, 34, 0.92)', border: '1px solid #44475a' });
 
-  // hero window: the terminal settles on the right, where the landing page keeps its demo
-  const TARGET = [964, 262, 860, 484];
+  const TARGET = L(HERO_WINDOW.wide, HERO_WINDOW.tall);
   const TYPE_AT = 0.7;
   const ENTER_AT = 1.75;
   const SHRINK_AT = 7.2;
   const SHRINK = 1.8;
 
-  const s = {
+  return {
     node,
     landsAt: start + SHRINK_AT + SHRINK,
     enterAt: start + ENTER_AT,
     resize(z) { zoom = z; },
-    render(lt, t) {
+    render(lt) {
       const typed = lt < ENTER_AT ? Math.min(4, Math.floor(clamp((lt - TYPE_AT) / 0.55) * 4 + (lt > TYPE_AT ? 1 : 0))) : -1;
       const p = prog(lt, SHRINK_AT, SHRINK, ease.inOutExpo);
       const [tx, ty, tw, th] = TARGET;
-      const x = lerp(0, tx, p);
-      const y = lerp(0, ty, p);
       const w = lerp(W, tw, p);
       const h = lerp(H, th, p);
-      box.style.left = x + 'px';
-      box.style.top = y + 'px';
-      box.style.width = w + 'px';
-      box.style.height = h + 'px';
+      place(box, lerp(0, tx, p), lerp(0, ty, p), w, h);
       css(box, 'border-radius', (p * 10).toFixed(1) + 'px');
       css(box, 'box-shadow', p > 0.01 ? 'var(--pane-shadow)' : 'none');
       term.resize(w, h, zoom * devicePixelRatio);
       term.draw(lt - ENTER_AT, typed === -1 ? -1 : Math.max(0, typed));
       showWords(cap, lt, 3.4, 6.9, { stagger: 0.03 });
-      style(box, 1);
     },
   };
-  return s;
 }
 
 // ---------------------------------------------------------------- 2. hero
@@ -332,27 +386,28 @@ function splashScene(ctx, start) {
 function heroScene(ctx, start, splash) {
   const node = scene(ctx.stage);
   node.style.zIndex = 2;
-  const win2 = el('div', 'abs', node);
-  const [wx, wy, ww, wh] = [964, 262, 860, 484];
-  place(win2, wx, wy, ww, wh);
+  const [wx, wy, ww, wh] = L(HERO_WINDOW.wide, HERO_WINDOW.tall);
+  const win2 = place(el('div', 'abs', node), wx, wy, ww, wh);
   Object.assign(win2.style, { borderRadius: '10px', overflow: 'hidden', boxShadow: 'var(--pane-shadow)' });
   const canvas = el('canvas', '', win2);
   Object.assign(canvas.style, { width: '100%', height: '100%', display: 'block' });
-  const term = new Terminal(canvas);
+  const term = terminalFor(canvas);
   let zoom = 1;
 
-  const mark = words(node, '', '<span style="font-weight:800;font-size:150px;letter-spacing:-0.03em;line-height:1">maki</span>', 132, 150, 700);
-  const tag = words(node, 'lead', 'the efficient coder', 138, 314, 700);
-  tag.node.style.fontSize = '44px';
-  const column = place(el('div', 'abs', node), 138, 432, 800);
-  Object.assign(column.style, { display: 'flex', flexDirection: 'column', gap: '30px' });
+  const align = L('left', 'center');
+  const mark = words(node, '', `<span style="font-weight:800;font-size:${L(150, 170)}px;letter-spacing:-0.03em;line-height:1">maki</span>`, L(132, 0), L(150, 830), L(700, W));
+  const tag = words(node, 'lead', 'the efficient coder', L(138, 0), L(314, 1010), L(700, W));
+  Object.assign(tag.node.style, { fontSize: '44px', textAlign: align });
+  mark.node.style.textAlign = align;
+  const column = place(el('div', 'abs', node), L(138, M), L(432, 1130), L(800, CW));
+  Object.assign(column.style, { display: 'flex', flexDirection: 'column', gap: L(30, 36) + 'px', textAlign: align });
   const [l1, l2, l3] = [
     'I got frustrated with existing coding agents and hitting hourly/weekly token limits.',
     'So I built maki, a lightweight Rust TUI with some novel context token reduction techniques.',
     'In benchmarks, it reduces cost by <span class="acc">2x</span> and finishes them <span class="acc">2x</span> faster too.',
   ].map(html => {
-    const b = words(column, 'say', html, 0, 0, 800);
-    Object.assign(b.node.style, { position: 'relative', left: 'auto', top: 'auto', fontSize: '36px' });
+    const b = words(column, 'say', html, 0, 0, L(800, CW));
+    Object.assign(b.node.style, { position: 'relative', left: 'auto', top: 'auto', fontSize: L(36, 46) + 'px' });
     return b;
   });
 
@@ -364,7 +419,8 @@ function heroScene(ctx, start, splash) {
       // the splash scene hands its terminal over at the moment it lands
       const global = start + lt;
       const handover = global >= splash.landsAt - 1e-3;
-      style(win2, handover ? 1 - prog(lt, END - 0.9, 0.7, ease.in) : 0, prog(lt, END - 0.9, 0.7, ease.in) * 80);
+      const out = prog(lt, END - 0.9, 0.7, ease.in);
+      style(win2, handover ? 1 - out : 0, L(out * 80, 0), L(0, out * -60));
       if (handover) {
         term.resize(ww, wh, zoom * devicePixelRatio);
         term.draw(global - splash.enterAt, -1);
@@ -397,38 +453,39 @@ function billScene(ctx, start) {
   const INDEXED_K = 1.4;
   const FEW = 20;
   const END = 27.5;
+  const BOTTOM = 1530;
 
-  const h1 = words(node, 'h1', 'Every turn re-sends the whole conversation.', 96, 124, 900);
-  const lead1 = words(node, 'lead', 'The API is stateless, so each turn pays again for everything before it.', 100, 280, 760);
-  const h1b = words(node, 'h1', 'Read a 2000-line file on turn 2 of a 40-turn session...', 96, 124, 980);
-  const lead2 = words(node, 'lead', '...and you pay for it on every turn after.', 100, 280, 800);
-  const h1d = words(node, 'h1', 'Prompt caching lowers the price.', 96, 124, 980);
-  const lead3 = words(node, 'lead', 'Cache reads still cost, and a bloated context makes the model dumber.', 100, 210, 800);
-  const h1c = words(node, 'h1', 'So maki attacks both multipliers.', 96, 124, 1000);
+  const h1 = title(node, 'Every turn re-sends the whole conversation.', 900);
+  const lead1 = sub(node, 'The API is stateless, so each turn pays again for everything before it.', h1, 280, 760, 'lead');
+  const h1b = title(node, 'Read a 2000-line file on turn 2 of a 40-turn session...', 980);
+  const lead2 = sub(node, '...and you pay for it on every turn after.', h1b, 280, 800, 'lead');
+  const h1d = title(node, 'Prompt caching lowers the price.', 980);
+  const lead3 = sub(node, 'Cache reads still cost, and a bloated context makes the model dumber.', h1d, 210, 800, 'lead');
+  const h1c = title(node, 'So maki attacks both multipliers.', 1000);
 
-  const diagram = place(el('pre', 'abs mono', node), 100, 620, 820);
-  Object.assign(diagram.style, { fontSize: '23px', lineHeight: '40px', color: 'var(--ink-2)' });
+  const diagram = place(el('pre', 'abs mono', node), L(100, M), L(620, BOTTOM), L(820, CW));
+  Object.assign(diagram.style, { fontSize: L(23, 26) + 'px', lineHeight: L(40, 44) + 'px', color: 'var(--ink-2)' });
   const diagLines = [
     'turn 1  [system + prompt]                ─► tool call',
     'turn 2  [system + prompt + result 1]     ─► tool call',
     'turn 3  [system + prompt + result 1 + 2] ─► ...',
   ].map(line => el('span', 'l', diagram, esc(line).replace(/\[(.*)\]/, '[<span class="acc">$1</span>]')));
 
-  const meter = place(el('div', 'abs', node), 1340, 124, 480);
+  const meter = place(el('div', 'abs', node), L(1340, M), L(124, 1250), L(480, CW));
   meter.innerHTML = `
-    <div class="mono" style="font-size:22px;color:var(--ink-3)">tokens sent so far</div>
-    <div data-k="total" style="font-weight:800;font-size:92px;letter-spacing:-0.03em;line-height:1.05;font-variant-numeric:tabular-nums">0</div>
-    <div class="mono" style="font-size:22px;color:var(--ink-3)"><span data-k="turn">turn 0</span><span data-k="was"></span></div>`;
+    <div class="mono" style="font-size:${L(22, 28)}px;color:var(--ink-3)">tokens sent so far</div>
+    <div data-k="total" style="font-weight:800;font-size:${L(92, 116)}px;letter-spacing:-0.03em;line-height:1.05;font-variant-numeric:tabular-nums">0</div>
+    <div class="mono" style="font-size:${L(22, 28)}px;color:var(--ink-3)"><span data-k="turn">turn 0</span><span data-k="was"></span></div>`;
   const total = meter.querySelector('[data-k="total"]');
   const turnLabel = meter.querySelector('[data-k="turn"]');
   const was = meter.querySelector('[data-k="was"]');
 
   const fileNote = place(el('div', 'abs mono', node, 'main.rs · 2000 lines ≈ 25k tokens'), 0, 0);
-  Object.assign(fileNote.style, { fontSize: '22px', color: 'var(--accent)', whiteSpace: 'nowrap' });
-  const math = place(el('div', 'abs', node), 100, 650, 800);
-  math.innerHTML = `<div class="mono" style="font-size:30px;line-height:1.5;color:var(--ink)">25k tokens <span class="dim">×</span> 38 turns</div>
-    <div style="font-weight:800;font-size:84px;line-height:1.1;color:var(--accent);letter-spacing:-0.03em">≈ 950k tokens</div>
-    <div class="mono dim" style="font-size:22px">for one file the model read once</div>`;
+  Object.assign(fileNote.style, { fontSize: L(22, 28) + 'px', color: 'var(--accent)', whiteSpace: 'nowrap' });
+  const math = place(el('div', 'abs', node), L(100, M), L(650, BOTTOM), L(800, CW));
+  math.innerHTML = `<div class="mono" style="font-size:${L(30, 34)}px;line-height:1.5;color:var(--ink)">25k tokens <span class="dim">×</span> 38 turns</div>
+    <div style="font-weight:800;font-size:${L(84, 96)}px;line-height:1.1;color:var(--accent);letter-spacing:-0.03em">≈ 950k tokens</div>
+    <div class="mono dim" style="font-size:${L(22, 28)}px">for one file the model read once</div>`;
 
   const svg = el('div', 'layer', node);
   svg.innerHTML = `<svg width="${W}" height="${H}" style="position:absolute;inset:0;overflow:visible">
@@ -441,21 +498,31 @@ function billScene(ctx, start) {
   const hLine = svg.querySelector('[data-k="hz"]');
   const leader = svg.querySelector('[data-k="lead"]');
   const dial = (y, glyph, name, how) => {
-    const d = place(el('div', 'abs', node), 100, y, 820);
-    d.innerHTML = `<div style="display:flex;gap:22px;align-items:baseline"><span class="acc" style="font-size:52px;font-weight:800;width:44px;text-align:center">${glyph}</span><div><div class="say" style="font-size:44px">${name}</div><div class="mono dim" style="font-size:22px;margin-top:4px">${how}</div></div></div>`;
+    const d = place(el('div', 'abs', node), L(100, M), y, L(820, CW));
+    d.innerHTML = `<div style="display:flex;gap:22px;align-items:baseline"><span class="acc" style="font-size:52px;font-weight:800;width:44px;text-align:center">${glyph}</span><div><div class="say" style="font-size:${L(44, 48)}px">${name}</div><div class="mono dim" style="font-size:${L(22, 26)}px;margin-top:4px">${how}</div></div></div>`;
     return d;
   };
-  const dialV = dial(300, '↕', 'smaller results', 'index · code_execution · subagents · tool_search');
-  const dialH = dial(470, '↔', 'fewer round-trips', 'batch · code_execution · compaction');
-  const foot = place(el('div', 'abs note', node, 'illustrative session: 3.2k system prompt, ~0.7k per tool result, 12 tokens per line'), 100, 1010, 1400);
-  foot.style.fontSize = '18px';
+  const dialV = dial(L(300, BOTTOM), '↕', 'smaller results', 'index · code_execution · subagents · tool_search');
+  const dialH = dial(L(470, BOTTOM + 170), '↔', 'fewer round-trips', 'batch · code_execution · compaction');
+  const foot = place(el('div', 'abs note', node, L('illustrative session: 3.2k system prompt, ~0.7k per tool result, 12 tokens per line', 'illustrative: 3.2k system prompt, ~0.7k per result, 12 tok/line')), L(100, M), L(1010, 1866), L(1400, CW));
+  foot.style.fontSize = L(18, 22) + 'px';
 
-  const turnLabels = [...Array(8)].map((_, i) => el('div', 'abs mono', node, `turn ${i + 1}`));
-  for (const l of turnLabels) Object.assign(l.style, { fontSize: '19px', color: 'var(--ink-3)', whiteSpace: 'nowrap', transform: 'translateX(-50%)' });
-  const bandLabels = ['system prompt + tools', 'your prompt'].map(n => el('div', 'abs mono', node, n));
+  const turnLabels = [...Array(8)].map((_, i) => el('div', 'abs mono', node, P && i ? String(i + 1) : `turn ${i + 1}`));
+  for (const l of turnLabels) Object.assign(l.style, { fontSize: L(19, 24) + 'px', color: 'var(--ink-3)', whiteSpace: 'nowrap', transform: 'translateX(-50%)' });
+  // wide: labels beside the first column. tall: there is no room beside it, so a legend above
+  const bandLabels = P ? [] : ['system prompt + tools', 'your prompt'].map(n => el('div', 'abs mono', node, n));
   for (const l of bandLabels) Object.assign(l.style, { fontSize: '19px', color: 'var(--ink-2)', whiteSpace: 'nowrap' });
+  const legend = P ? place(el('div', 'abs mono', node), M, 520, CW) : null;
+  const swatches = [];
+  if (legend) {
+    Object.assign(legend.style, { display: 'flex', flexWrap: 'wrap', gap: '10px 30px', fontSize: '26px', color: 'var(--ink-2)' });
+    for (const [key, name] of [['sys', 'system + tools'], ['prompt', 'your prompt'], ['r0', 'tool results']]) {
+      const item = el('span', '', legend, `<i style="display:inline-block;width:22px;height:22px;border-radius:4px;margin-right:10px;vertical-align:-3px"></i>${name}`);
+      swatches.push([key, item.firstChild]);
+    }
+  }
   const newest = el('div', 'abs mono', node, '');
-  Object.assign(newest.style, { fontSize: '19px', color: 'var(--accent)', whiteSpace: 'nowrap', transform: 'translateX(-50%)' });
+  Object.assign(newest.style, { fontSize: L(19, 26) + 'px', color: 'var(--accent)', whiteSpace: 'nowrap', transform: 'translateX(-50%)' });
 
   let items = null;
   let peak = 0;
@@ -480,8 +547,7 @@ function billScene(ctx, start) {
     const dh = prog(lt, FEWER - 0.3, 0.7, ease.outExpo);
     style(dialH, dh * (1 - prog(lt, END - 0.5, 0.45, ease.in)), 0, (1 - dh) * 24);
 
-    const mathP = win(lt, 12.4, 20.0, 0.6, 0.45);
-    style(math, mathP, 0, (1 - prog(lt, 12.4, 0.6)) * 20);
+    style(math, win(lt, 12.4, 20.0, 0.6, 0.45), 0, (1 - prog(lt, 12.4, 0.6)) * 20);
     style(foot, win(lt, 12.4, END - 0.1, 0.6, 0.5) * 0.9);
     if (!world) return;
     items ??= world.items;
@@ -511,7 +577,8 @@ function billScene(ctx, start) {
     b = b.map((v, i) => lerp(v, box(40, FILE_K)[i], zoomOut));
     b = b.map((v, i) => lerp(v, box(40, INDEXED_K)[i], shrinkView));
     b = b.map((v, i) => lerp(v, box(FEW, INDEXED_K)[i], fewerView));
-    const region = [lerp(900, 980, zoomOut), lerp(430, 400, zoomOut), lerp(900, 840, zoomOut), lerp(500, 540, zoomOut)];
+    const [r0, r1] = L([[900, 430, 900, 500], [980, 400, 840, 540]], [[80, 600, 920, 600], [50, 600, 980, 620]]);
+    const region = r0.map((v, i) => lerp(v, r1[i], zoomOut));
     const yaw = lerp(0.62, 0.5, prog(lt, 0, END, ease.linear));
     const pitch = lerp(0.52, 0.46, zoomOut);
 
@@ -540,13 +607,18 @@ function billScene(ctx, start) {
       l.style.top = y + 6 + 'px';
       style(l, prog(lt, riseAt(i + 1), 0.4) * (1 - prog(lt, FF - 0.8, 0.6)));
     });
+    const bandOp = t0 => prog(lt, t0, 0.5) * (1 - prog(lt, INFLATE - 0.6, 0.5));
     const bandY = [items[0][0] / 2, items[0][0] + items[1][0] / 2];
     bandLabels.forEach((l, i) => {
       const [x, y] = world.project(-0.36, bandY[i] * k, 0.36);
       l.style.left = x - l.offsetWidth - 22 + 'px';
       l.style.top = y - 13 - (i ? 22 : -6) + 'px';
-      style(l, prog(lt, TURN0 + 0.3 + i * 0.3, 0.5) * (1 - prog(lt, INFLATE - 0.6, 0.5)));
+      style(l, bandOp(TURN0 + 0.3 + i * 0.3));
     });
+    if (legend) {
+      for (const [key, sw] of swatches) css(sw, 'background', '#' + world.colors[key].getHexString());
+      style(legend, bandOp(TURN0 + 0.3));
+    }
     const newestK = Math.min(8, latest);
     if (newestK >= 2) {
       const [x, y] = world.project((newestK - 1) * SP, colH(newestK, 0) + 1.7, 0);
@@ -560,13 +632,21 @@ function billScene(ctx, start) {
     const [fx, fy] = world.project(2 * SP - 0.36, fileY, 0.36);
     const noteOp = win(lt, INFLATE + 0.5, SMALLER + 0.2, 0.5, 0.4);
     style(fileNote, noteOp);
-    fileNote.style.left = fx - fileNote.offsetWidth - 40 + 'px';
-    fileNote.style.top = fy - 60 + 'px';
-    leader.setAttribute('x1', fx - 34);
-    leader.setAttribute('y1', fy - 36);
-    leader.setAttribute('x2', fx - 4);
-    leader.setAttribute('y2', fy - 4);
     style(leader, noteOp);
+    if (P) {
+      // above the staircase, pointing down into the band
+      place(fileNote, M, 530);
+      leader.setAttribute('x1', M + 120);
+      leader.setAttribute('y1', 575);
+      leader.setAttribute('x2', fx - 4);
+      leader.setAttribute('y2', fy - 4);
+    } else {
+      place(fileNote, fx - fileNote.offsetWidth - 40, fy - 60);
+      leader.setAttribute('x1', fx - 34);
+      leader.setAttribute('y1', fy - 36);
+      leader.setAttribute('x2', fx - 4);
+      leader.setAttribute('y2', fy - 4);
+    }
 
     const lastCol = Math.max(1, Math.round(lastTurn));
     const topY = colH(lastCol, fileK(lastCol));
@@ -645,17 +725,13 @@ const SKELETON = [
 
 function indexScene(ctx, start) {
   const node = scene(ctx.stage);
-  const SRC_X = 96;
-  const SRC_Y = 116;
-  const SRC_W = 800;
-  const SRC_LH = 26;
-  const SK_X = 1000;
-  const SK_Y = 300;
-  const SK_W = 824;
+  // wide: file and skeleton side by side, joined by curves. tall: the skeleton
+  // slides over the bottom of the file, then steps aside for the ranged read
+  const [SRC_X, SRC_Y, SRC_W, SRC_LH, SRC_FONT] = L([96, 116, 800, 26, 19], [M, 490, CW, 32, 26]);
+  const [SK_X, SK_Y, SK_W] = L([1000, 300, 824], [M, 1000, CW]);
   const OUT_AT = 12.2;
 
-  const src = pane(node, SRC_X, SRC_Y, SRC_W, PANE_HEAD + PRE_PAD * 2 + SRC.length * SRC_LH, 'src/main.rs', '32 lines');
-  Object.assign(src.pre.style, { lineHeight: SRC_LH + 'px', fontSize: '19px' });
+  const src = codePane(node, SRC_X, SRC_Y, SRC_W, SRC, SRC_FONT, SRC_LH, 'src/main.rs', '32 lines');
   const srcLines = lines(src.pre, SRC, true);
   const kept = new Set(SKELETON.flatMap(r => r[1]));
   const band = el('div', 'abs', src.node);
@@ -668,54 +744,56 @@ function indexScene(ctx, start) {
   const readBox = el('div', 'abs', src.node);
   Object.assign(readBox.style, { left: '6px', right: '6px', top: PANE_HEAD + PRE_PAD + 19 * SRC_LH - 2 + 'px', height: 13 * SRC_LH + 4 + 'px', border: '2px solid oklch(75% 0.12 45)', borderRadius: '4px' });
 
-  const sk = pane(node, SK_X, SK_Y, SK_W, PANE_HEAD + PRE_PAD * 2 + SKELETON.length * CODE_LH, 'maki index src/main.rs', 'skeleton, 15 lines');
-  sk.pre.style.lineHeight = CODE_LH + 'px';
+  const sk = codePane(node, SK_X, SK_Y, SK_W, SKELETON, L(21, 28), CODE_LH, 'maki index src/main.rs', 'skeleton, 15 lines');
   const skLines = lines(sk.pre, SKELETON.map(r => r[0]));
 
-  const h1 = words(node, 'h1', '<code>index</code>: read less, know more', SK_X, 112, 860);
-  const lead = words(node, 'lead', 'tree-sitter turns a file into a skeleton, with line ranges.', SK_X + 4, 196, 820);
-  lead.node.style.fontSize = '32px';
-  const lead2 = words(node, 'lead', 'Then the model reads only the lines it needs.', SK_X + 4, 196, 820);
-  lead2.node.style.fontSize = '32px';
-  const lead3 = words(node, 'lead', 'On a real file the gap gets wide.', 100, 196, 1400);
-  lead3.node.style.fontSize = '32px';
+  const h1 = words(node, 'h1', '<code>index</code>: read less, know more', L(SK_X, M), L(112, 150), L(860, CW));
+  const lead = sub(node, 'tree-sitter turns a file into a skeleton, with line ranges.', h1, 196, 820);
+  const lead2 = sub(node, 'Then the model reads only the lines it needs.', h1, 196, 820);
+  const lead3 = sub(node, 'On a real file the gap gets wide.', h1, 196, 1400);
+  if (!P) for (const b of [lead, lead2]) b.node.style.left = SK_X + 4 + 'px';
 
-  const svgWrap = el('div', 'layer', node);
   const paths = [];
-  let svgInner = `<svg width="${W}" height="${H}" style="position:absolute;inset:0;overflow:visible">`;
-  SKELETON.forEach(([, from], i) => {
-    for (const f of from) {
-      const x0 = SRC_X + SRC_W - 10;
-      const y0 = lineY(SRC_Y, f, SRC_LH);
-      const x1 = SK_X + 8;
-      const y1 = lineY(SK_Y, i);
-      svgInner += `<path data-i="${i}" d="M${x0} ${y0} C ${x0 + 70} ${y0}, ${x1 - 70} ${y1}, ${x1} ${y1}" fill="none" stroke="oklch(75% 0.12 45)" stroke-width="1.6" stroke-opacity="0.75" pathLength="1" stroke-dasharray="1 1"/>`;
-    }
-  });
-  svgWrap.innerHTML = svgInner + '</svg>';
-  svgWrap.querySelectorAll('path').forEach(p => paths.push([Number(p.dataset.i), p]));
+  if (!P) {
+    const svgWrap = el('div', 'layer', node);
+    let svgInner = `<svg width="${W}" height="${H}" style="position:absolute;inset:0;overflow:visible">`;
+    SKELETON.forEach(([, from], i) => {
+      for (const f of from) {
+        const x0 = SRC_X + SRC_W - 10;
+        const y0 = lineY(SRC_Y, f, SRC_LH);
+        const x1 = SK_X + 8;
+        const y1 = lineY(SK_Y, i);
+        svgInner += `<path data-i="${i}" d="M${x0} ${y0} C ${x0 + 70} ${y0}, ${x1 - 70} ${y1}, ${x1} ${y1}" fill="none" stroke="oklch(75% 0.12 45)" stroke-width="1.6" stroke-opacity="0.75" pathLength="1" stroke-dasharray="1 1"/>`;
+      }
+    });
+    svgWrap.innerHTML = svgInner + '</svg>';
+    svgWrap.querySelectorAll('path').forEach(p => paths.push([Number(p.dataset.i), p]));
+  }
 
-  const tui = pane(node, SK_X, SK_Y + PANE_HEAD + PRE_PAD * 2 + SKELETON.length * CODE_LH + 32, SK_W, 104, null, '', 'tui');
+  const tuiY = L(SK_Y + PANE_HEAD + PRE_PAD * 2 + SKELETON.length * CODE_LH + 32, SRC_Y + PANE_HEAD + PRE_PAD * 2 + SRC.length * SRC_LH + 40);
+  const tui = pane(node, SK_X, tuiY, SK_W, L(104, 130), null, '', 'tui');
   const t1 = el('span', 'l', tui.pre, '<span class="dot">●</span> <span class="tool">index&gt;</span> <span class="path">src/main.rs</span> <span class="ann">(15 lines)</span>');
   const t2 = el('span', 'l', tui.pre, '<span class="dot">●</span> <span class="tool">read&gt;</span> <span class="path">src/main.rs:20-32</span> <span class="ann">(13 of 32 lines)</span>');
 
   // 1400 lines against 60 + 40, drawn to scale
-  const BAR_W = 1480;
-  const bars = place(el('div', 'abs', node), 100, 320, 1720);
+  const BAR_W = L(1480, 700);
+  const mono = L(24, 28);
+  const big = L(64, 72);
+  const bars = place(el('div', 'abs', node), L(100, M), L(320, 560), L(1720, CW));
   bars.innerHTML = `
-    <div class="mono dim" style="font-size:24px"><span style="color:var(--ink)">read</span> big.rs</div>
-    <div style="display:flex;align-items:center;gap:22px;margin:10px 0 50px"><div data-k="a" style="height:64px;border-radius:6px;background:var(--ink-3)"></div><span data-k="an" style="white-space:nowrap"><span class="stat-big" style="font-size:64px">1400</span> <span class="mono dim" style="font-size:24px">lines</span></span></div>
-    <div class="mono dim" style="font-size:24px"><span class="acc">index</span> big.rs, then <span class="acc">read</span> offset=812 limit=40</div>
-    <div style="display:flex;align-items:center;gap:22px;margin-top:10px"><div style="display:flex;gap:4px"><div data-k="b1" style="height:64px;border-radius:6px 0 0 6px;background:var(--accent)"></div><div data-k="b2" style="height:64px;border-radius:0 6px 6px 0;background:oklch(75% 0.12 45 / 0.55)"></div></div><span data-k="bn" class="stat-big acc" style="font-size:64px">60 + 40</span><span class="mono dim" style="font-size:24px">lines: signatures + the range it needs</span></div>`;
+    <div class="mono dim" style="font-size:${mono}px"><span style="color:var(--ink)">read</span> big.rs</div>
+    <div style="display:flex;align-items:center;gap:22px;margin:10px 0 50px"><div data-k="a" style="height:64px;border-radius:6px;background:var(--ink-3)"></div><span data-k="an" style="white-space:nowrap"><span class="stat-big" style="font-size:${big}px">1400</span> <span class="mono dim" style="font-size:${mono}px">lines</span></span></div>
+    <div class="mono dim" style="font-size:${mono}px"><span class="acc">index</span> big.rs, then <span class="acc">read</span> offset=812 limit=40</div>
+    <div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px 22px;margin-top:10px"><div style="display:flex;gap:4px"><div data-k="b1" style="height:64px;border-radius:6px 0 0 6px;background:var(--accent)"></div><div data-k="b2" style="height:64px;border-radius:0 6px 6px 0;background:oklch(75% 0.12 45 / 0.55)"></div></div><span data-k="bn" class="stat-big acc" style="font-size:${big}px">60 + 40</span><span class="mono dim" style="font-size:${mono}px">lines: signatures + the range it needs</span></div>`;
   const $ = k => bars.querySelector(`[data-k="${k}"]`);
   const barA = $('a');
   const barB1 = $('b1');
   const barB2 = $('b2');
-  const nums = place(el('div', 'abs', node), 100, 720, 1720);
+  const nums = place(el('div', 'abs', node), L(100, M), L(720, 1110), L(1720, CW));
   nums.innerHTML = `
-    <div class="say" style="font-size:44px">In my sessions: costs <span class="acc">59</span> tok/turn, saves <span class="acc">224</span> on reads.</div>
-    <div class="lead" style="font-size:34px;margin-top:14px">Reads were ~65% of my tokens, so this one is big.</div>
-    <div class="note" style="margin-top:30px;font-size:22px">30+ languages, each through its own tree-sitter grammar. The tool itself is a Lua plugin.</div>`;
+    <div class="say" style="font-size:${L(44, 50)}px">In my sessions: costs <span class="acc">59</span> tok/turn, saves <span class="acc">224</span> on reads.</div>
+    <div class="lead" style="font-size:${L(34, 42)}px;margin-top:14px">Reads were ~65% of my tokens, so this one is big.</div>
+    <div class="note" style="margin-top:30px;font-size:${L(22, 28)}px">30+ languages, each through its own tree-sitter grammar. The tool itself is a Lua plugin.</div>`;
   const numsParts = [...nums.children];
 
   return {
@@ -724,11 +802,10 @@ function indexScene(ctx, start) {
       style(node, 1 - prog(lt, 23.2, 0.7, ease.in));
       const srcIn = prog(lt, 0, 0.8, ease.outExpo);
       const gone = prog(lt, OUT_AT, 0.6);
-      style(src.node, srcIn * (1 - gone), (1 - srcIn) * -60, 0);
+      style(src.node, srcIn * (1 - gone), L((1 - srcIn) * -60, 0), L(0, (1 - srcIn) * 40));
       fadeLines(srcLines, lt, 0.1, 0.018);
-      const slide = prog(lt, OUT_AT + 0.2, 0.9, ease.inOutExpo);
       showWords(h1, lt, 0.3, 23.3);
-      h1.node.style.left = lerp(SK_X, 96, slide) + 'px';
+      if (!P) h1.node.style.left = lerp(SK_X, 96, prog(lt, OUT_AT + 0.2, 0.9, ease.inOutExpo)) + 'px';
       showWords(lead, lt, 0.9, 8.8, { stagger: 0.025 });
       showWords(lead2, lt, 9.0, OUT_AT + 0.2, { stagger: 0.025 });
       showWords(lead3, lt, OUT_AT + 0.9, 23.3, { stagger: 0.03 });
@@ -739,8 +816,7 @@ function indexScene(ctx, start) {
       const scanLine = lerp(-3, SRC.length, scan) + 1.5;
       const reading = prog(lt, 9.2, 0.5);
       srcLines.forEach((l, i) => {
-        const keep = kept.has(i);
-        let o = scanLine > i && !keep ? lerp(1, 0.32, prog(lt, 2.0 + (i / SRC.length) * 2.2, 0.4)) : 1;
+        let o = scanLine > i && !kept.has(i) ? lerp(1, 0.32, prog(lt, 2.0 + (i / SRC.length) * 2.2, 0.4)) : 1;
         if (reading > 0) o = lerp(o, i >= 19 ? 1 : 0.22, reading);
         css(l.lastChild, 'opacity', o.toFixed(3));
         css(l.firstChild, 'opacity', o.toFixed(3));
@@ -748,7 +824,9 @@ function indexScene(ctx, start) {
       marks.forEach((m, i) => style(m, kept.has(i) && scanLine > i ? 1 - reading : 0));
       style(readBox, reading);
 
-      style(sk.node, prog(lt, 4.2, 0.6) * (1 - gone), 0, (1 - prog(lt, 4.2, 0.6)) * 20);
+      // tall: the skeleton covers the file's tail until the ranged read needs it back
+      const skOut = L(gone, prog(lt, 8.8, 0.4));
+      style(sk.node, prog(lt, 4.2, 0.6) * (1 - skOut), 0, (1 - prog(lt, 4.2, 0.6)) * L(20, 60));
       const skAt = i => 4.5 + i * 0.13;
       skLines.forEach((l, i) => {
         const p = prog(lt, skAt(i), 0.4);
@@ -766,10 +844,8 @@ function indexScene(ctx, start) {
       style(t2, prog(lt, 9.8, 0.3));
 
       style(bars, prog(lt, OUT_AT + 1.0, 0.5));
-      const growA = prog(lt, OUT_AT + 1.2, 1.4, ease.inOutExpo);
-      barA.style.width = (BAR_W * growA).toFixed(1) + 'px';
-      const growB = prog(lt, OUT_AT + 2.8, 0.9, ease.outExpo);
-      barB1.style.width = ((BAR_W * 60) / 1400 * growB).toFixed(1) + 'px';
+      barA.style.width = (BAR_W * prog(lt, OUT_AT + 1.2, 1.4, ease.inOutExpo)).toFixed(1) + 'px';
+      barB1.style.width = ((BAR_W * 60) / 1400 * prog(lt, OUT_AT + 2.8, 0.9, ease.outExpo)).toFixed(1) + 'px';
       barB2.style.width = ((BAR_W * 40) / 1400 * prog(lt, OUT_AT + 3.3, 0.7, ease.outExpo)).toFixed(1) + 'px';
       style($('an'), prog(lt, OUT_AT + 2.2, 0.5));
       style($('bn').parentNode.lastElementChild, prog(lt, OUT_AT + 3.8, 0.5));
@@ -784,7 +860,7 @@ function indexScene(ctx, start) {
 
 // ---------------------------------------------------------------- 5. code_execution
 
-const SCRIPT = [
+const SCRIPT_HEAD = [
   '<span class="cm"># find dead exports in a TS repo</span>',
   'files = <span class="kw">await</span> <span class="fn">glob</span>(pattern=<span class="st">\'src/**/*.ts\'</span>)',
   'srcs = <span class="kw">await</span> asyncio.<span class="fn">gather</span>(',
@@ -793,14 +869,32 @@ const SCRIPT = [
   '',
   'exports, imports = {}, <span class="fn">set</span>()',
   '<span class="kw">for</span> f, src <span class="kw">in</span> <span class="fn">zip</span>(files, srcs):',
-  '    <span class="kw">for</span> m <span class="kw">in</span> re.<span class="fn">finditer</span>(<span class="st">r\'^export \\w+ (\\w+)\'</span>, src, re.M):',
-  '        exports[m.<span class="fn">group</span>(1)] = f',
-  '    <span class="kw">for</span> m <span class="kw">in</span> re.<span class="fn">finditer</span>(<span class="st">r\'import\\s*\\{([^}]+)\\}\'</span>, src):',
-  '        imports.<span class="fn">update</span>(n.<span class="fn">strip</span>() <span class="kw">for</span> n <span class="kw">in</span> m.<span class="fn">group</span>(1).<span class="fn">split</span>(<span class="st">\',\'</span>))',
+];
+const SCRIPT_TAIL = [
   '',
   '<span class="kw">for</span> name, f <span class="kw">in</span> exports.<span class="fn">items</span>():',
   '    <span class="kw">if</span> name <span class="kw">not in</span> imports:',
   '        <span class="fn">print</span>(<span class="st">f\'{f}  {name}\'</span>)',
+];
+const SCRIPT_WIDE = [
+  ...SCRIPT_HEAD,
+  '    <span class="kw">for</span> m <span class="kw">in</span> re.<span class="fn">finditer</span>(<span class="st">r\'^export \\w+ (\\w+)\'</span>, src, re.M):',
+  '        exports[m.<span class="fn">group</span>(1)] = f',
+  '    <span class="kw">for</span> m <span class="kw">in</span> re.<span class="fn">finditer</span>(<span class="st">r\'import\\s*\\{([^}]+)\\}\'</span>, src):',
+  '        imports.<span class="fn">update</span>(n.<span class="fn">strip</span>() <span class="kw">for</span> n <span class="kw">in</span> m.<span class="fn">group</span>(1).<span class="fn">split</span>(<span class="st">\',\'</span>))',
+  ...SCRIPT_TAIL,
+];
+// the same script, wrapped the way black would at a narrow width
+const SCRIPT_TALL = [
+  ...SCRIPT_HEAD,
+  '    <span class="kw">for</span> m <span class="kw">in</span> re.<span class="fn">finditer</span>(',
+  '            <span class="st">r\'^export \\w+ (\\w+)\'</span>, src, re.M):',
+  '        exports[m.<span class="fn">group</span>(1)] = f',
+  '    <span class="kw">for</span> m <span class="kw">in</span> re.<span class="fn">finditer</span>(',
+  '            <span class="st">r\'import\\s*\\{([^}]+)\\}\'</span>, src):',
+  '        imports.<span class="fn">update</span>(',
+  '            n.<span class="fn">strip</span>() <span class="kw">for</span> n <span class="kw">in</span> m.<span class="fn">group</span>(1).<span class="fn">split</span>(<span class="st">\',\'</span>))',
+  ...SCRIPT_TAIL,
 ];
 const OUTPUT = [
   'src/lib/csv.ts       parseCsvLegacy',
@@ -810,57 +904,56 @@ const OUTPUT = [
 
 function execScene(ctx, start) {
   const node = scene(ctx.stage);
-  const h1 = words(node, 'h1', '<code>code_execution</code>: think inside the sandbox', 96, 124, 1500);
-  const lead = words(node, 'lead', 'Tools are async Python functions. Only what the script prints enters your context.', 100, 208, 1500);
-  lead.node.style.fontSize = '32px';
+  const h1 = title(node, '<code>code_execution</code>: think inside the sandbox', 1500);
+  const lead = sub(node, 'Tools are async Python functions. Only what the script prints enters your context.', h1, 208);
 
-  const SCRIPT_Y = 300;
-  const script = pane(node, 96, SCRIPT_Y, 1010, PANE_HEAD + PRE_PAD * 2 + SCRIPT.length * CODE_LH, 'script', 'python, runs in monty');
-  script.pre.style.lineHeight = CODE_LH + 'px';
-  script.pre.style.fontSize = '19.5px';
+  const SCRIPT = L(SCRIPT_WIDE, SCRIPT_TALL);
+  const [SCRIPT_X, SCRIPT_Y, SCRIPT_W, FONT, LH] = L([96, 300, 1010, 19.5, CODE_LH], [M, 500, CW, 25, 33]);
+  const script = codePane(node, SCRIPT_X, SCRIPT_Y, SCRIPT_W, SCRIPT, FONT, LH, 'script', 'python, runs in monty');
   const scriptLines = lines(script.pre, SCRIPT);
-  const caret = caretFor(script.pre, 19.5);
-  caret.style.color = 'var(--t-ink)';
+  const caret = caretFor(script.pre, FONT);
 
-  const BOX = [1190, 300, 634, 400];
+  const BOX = L([1190, 300, 634, 400], [M, 1270, CW, 300]);
   const box = place(el('div', 'abs', node), ...BOX);
   Object.assign(box.style, { borderRadius: '14px', border: '2px dashed var(--ink-3)', background: 'var(--well)' });
+  const small = L(19, 26);
   const boxLabel = el('div', 'abs mono', box, 'monty sandbox · capped time + memory');
-  Object.assign(boxLabel.style, { left: '20px', top: '14px', fontSize: '19px', color: 'var(--ink-2)' });
-  const never = el('div', 'abs', box, '<div class="stat-big" style="font-size:72px">297 files</div><div class="lead" style="font-size:30px">never reached the model</div>');
-  Object.assign(never.style, { left: 0, right: 0, top: '130px', textAlign: 'center' });
+  Object.assign(boxLabel.style, { left: '20px', top: '14px', fontSize: small + 'px', color: 'var(--ink-2)' });
+  const never = el('div', 'abs', box, `<div class="stat-big" style="font-size:${L(72, 80)}px">297 files</div><div class="lead" style="font-size:${L(30, 36)}px">never reached the model</div>`);
+  Object.assign(never.style, { left: 0, right: 0, top: L(130, 70) + 'px', textAlign: 'center' });
   const boxCount = el('div', 'abs mono', box, '');
-  Object.assign(boxCount.style, { left: '20px', bottom: '14px', fontSize: '19px' });
+  Object.assign(boxCount.style, { left: '20px', bottom: '14px', fontSize: small + 'px' });
 
-  const OUT_Y = 760;
-  const outPane = pane(node, 1190, OUT_Y, 634, PANE_HEAD + PRE_PAD * 2 + 3 * CODE_LH, 'output', '3 lines · all the model sees');
-  outPane.pre.style.lineHeight = CODE_LH + 'px';
-  outPane.pre.style.fontSize = '19.5px';
+  const OUT_Y = L(760, 1600);
+  const outPane = codePane(node, BOX[0], OUT_Y, BOX[2], OUTPUT, FONT, LH, 'output', '3 lines · all the model sees');
   const outLines = lines(outPane.pre, OUTPUT.map(esc));
 
-  const stat = place(el('div', 'abs', node), 96, 890, 1040);
-  stat.innerHTML = `<div style="display:flex;align-items:baseline;gap:26px"><span class="stat-big" style="font-size:80px">~40k</span><span class="mono dim" style="font-size:26px">tokens read</span><span class="acc" style="font-size:60px;font-weight:800">→</span><span class="stat-big acc" style="font-size:80px">~30</span><span class="mono dim" style="font-size:26px">tokens in context</span></div>`;
-  const compare = place(el('div', 'abs', node), 96, 330, 1010);
+  const statBig = L(80, 100);
+  const statMono = L(26, 30);
+  const stat = place(el('div', 'abs', node), L(96, M), L(890, 1000), L(1040, CW));
+  stat.innerHTML = `<div style="display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 26px"><span style="white-space:nowrap"><span class="stat-big" style="font-size:${statBig}px">~40k</span> <span class="mono dim" style="font-size:${statMono}px">tokens read</span></span><span style="white-space:nowrap"><span class="acc" style="font-size:60px;font-weight:800">→</span> <span class="stat-big acc" style="font-size:${statBig}px">~30</span> <span class="mono dim" style="font-size:${statMono}px">tokens in context</span></span></div>`;
+  const cmpSay = L(40, 36);
+  const compare = place(el('div', 'abs', node), L(96, M), L(330, 520), L(1010, CW));
   compare.innerHTML = `
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:40px">
-      <div><div class="mono dim" style="font-size:24px;margin-bottom:14px">without</div>
-        <div class="say" style="font-size:40px;line-height:1.5;color:var(--ink-2)">glob → 300 paths<br>read × 300<br>300 results in context,<br>re-sent every turn</div></div>
-      <div><div class="mono acc" style="font-size:24px;margin-bottom:14px">with code_execution</div>
-        <div class="say" style="font-size:40px;line-height:1.5">1 script, 1 turn<br>filtered in Python<br>3 lines in context</div></div>
+      <div><div class="mono dim" style="font-size:${L(24, 28)}px;margin-bottom:14px">without</div>
+        <div class="say" style="font-size:${cmpSay}px;line-height:1.5;color:var(--ink-2)">glob → 300 paths<br>read × 300<br>300 results in context,<br>re-sent every turn</div></div>
+      <div><div class="mono acc" style="font-size:${L(24, 28)}px;margin-bottom:14px">with code_execution</div>
+        <div class="say" style="font-size:${cmpSay}px;line-height:1.5">1 script, 1 turn<br>filtered in Python<br>3 lines in context</div></div>
     </div>
-    <div class="note" style="margin-top:40px;font-size:22px">it shrinks the result and removes the round-trips, both multipliers at once</div>`;
+    <div class="note" style="margin-top:40px;font-size:${L(22, 28)}px">it shrinks the result and removes the round-trips, both multipliers at once</div>`;
 
   // every read is a card: out of the script, into the sandbox; three survive and become the output
   const swarm = el('canvas', 'layer', node);
-  const sctx = swarm.getContext('2d');
   let zoom = 1;
   const r = rng(5);
   const N = 300;
   const KEEP = new Map([[41, 0], [150, 1], [233, 2]]);
-  const FROM = [96 + 22 + 30 * 11.7, lineY(SCRIPT_Y, 3)];
+  const CARD = L(1, 1.3);
+  const FROM = [SCRIPT_X + L(22, 28) + 30 * FONT * 0.6, lineY(SCRIPT_Y, 3, LH)];
   const cards = [...Array(N)].map((_, i) => ({
     hx: BOX[0] + 30 + r() * (BOX[2] - 90),
-    hy: BOX[1] + 60 + r() * (BOX[3] - 130),
+    hy: BOX[1] + L(60, 56) + r() * (BOX[3] - L(130, 120)),
     at: 5.6 + (i / N) * 2.3 + r() * 0.25,
     arc: 20 + r() * 70,
     drift: r() * 6.28,
@@ -884,14 +977,7 @@ function execScene(ctx, start) {
       const boxIn = prog(lt, 4.6, 0.7, ease.outExpo);
       style(box, boxIn, 0, (1 - boxIn) * 30);
 
-      const pw = Math.round(W * zoom * devicePixelRatio);
-      const ph = Math.round(H * zoom * devicePixelRatio);
-      if (swarm.width !== pw || swarm.height !== ph) {
-        swarm.width = pw;
-        swarm.height = ph;
-      }
-      sctx.setTransform(pw / W, 0, 0, ph / H, 0, 0);
-      sctx.clearRect(0, 0, W, H);
+      const sctx = fitCanvas(swarm, W, H, zoom);
       const root = getComputedStyle(document.documentElement);
       const inkC = root.getPropertyValue('--ink-3');
       const accC = root.getPropertyValue('--accent');
@@ -906,7 +992,7 @@ function execScene(ctx, start) {
           let y = lerp(FROM[1], c.hy, p) - Math.sin(p * Math.PI) * c.arc + Math.cos(lt * 1.1 + c.drift) * 4 * p;
           let o = Math.min(1, p * 4);
           let color = inkC;
-          let w = 30;
+          let w = 30 * CARD;
           if (c.slot < 0) {
             const f = prog(lt, FILTER + c.fall * 0.8, 0.5, ease.in);
             o *= 1 - f;
@@ -914,31 +1000,29 @@ function execScene(ctx, start) {
           } else if (lt > FILTER) {
             color = accC;
             const lift = prog(lt, FILTER + 0.2, 0.7, ease.inOutExpo);
-            const tx = BOX[0] + 60 + c.slot * 190;
-            const ty = BOX[1] + BOX[3] - 110;
-            x = lerp(x, tx, lift);
-            y = lerp(y, ty, lift);
+            x = lerp(x, BOX[0] + 60 + c.slot * 190, lift);
+            y = lerp(y, BOX[1] + BOX[3] - L(110, 90), lift);
             const go = prog(lt, TO_OUT, 0.8, ease.inOutExpo);
-            x = lerp(x, 1190 + 22, go);
-            y = lerp(y, lineY(OUT_Y, c.slot) - 11, go);
-            w = lerp(30, 420, go);
+            x = lerp(x, BOX[0] + L(22, 28), go);
+            y = lerp(y, lineY(OUT_Y, c.slot, LH) - 11 * CARD, go);
+            w = lerp(30 * CARD, L(420, 560), go);
             o *= 1 - prog(lt, TO_OUT + 0.7, 0.35);
           }
           if (o <= 0.01) continue;
+          const h = 22 * CARD;
           sctx.globalAlpha = o * 0.9;
           sctx.fillStyle = color;
           sctx.beginPath();
-          sctx.roundRect(x, y, w, 22, 3);
+          sctx.roundRect(x, y, w, h, 3);
           sctx.fill();
           sctx.globalAlpha = o * 0.5;
           sctx.fillStyle = lineC;
-          sctx.fillRect(x + 5, y + 6, w * 0.55, 2.5);
-          sctx.fillRect(x + 5, y + 13, w * 0.35, 2.5);
+          sctx.fillRect(x + 5, y + h * 0.27, w * 0.55, 2.5 * CARD);
+          sctx.fillRect(x + 5, y + h * 0.6, w * 0.35, 2.5 * CARD);
         }
         sctx.globalAlpha = 1;
       }
-      const tokensIn = (inside / N) * 40;
-      text(boxCount, lt < FILTER + 0.3 ? `read × ${inside} · ${tokensIn.toFixed(1)}k tokens, all in here` : 'regex filter · 297 dropped · 3 printed');
+      text(boxCount, lt < FILTER + 0.3 ? `read × ${inside} · ${((inside / N) * 40).toFixed(1)}k tokens, all in here` : 'regex filter · 297 dropped · 3 printed');
       css(boxCount, 'color', lt < FILTER + 0.3 ? 'var(--ink-2)' : 'var(--accent)');
 
       const nv = prog(lt, TO_OUT + 0.9, 0.7, ease.outExpo);
@@ -946,7 +1030,8 @@ function execScene(ctx, start) {
       const outIn = prog(lt, 10.4, 0.5);
       style(outPane.node, outIn, 0, (1 - outIn) * 20);
       fadeLines(outLines, lt, TO_OUT + 0.6, 0.12, 0.4, 0);
-      const statIn = prog(lt, 12.2, 0.7, ease.outExpo);
+      // tall: the stat takes the script's place once it has gone
+      const statIn = prog(lt, L(12.2, 14.8), 0.7, ease.outExpo);
       style(stat, statIn, 0, (1 - statIn) * 24);
       const cmp = prog(lt, 14.4, 0.8, ease.outExpo);
       style(compare, cmp * (1 - prog(lt, 22.2, 0.5)), 0, (1 - cmp) * 24);
@@ -958,11 +1043,13 @@ function execScene(ctx, start) {
 
 function taskScene(ctx, start) {
   const node = scene(ctx.stage);
-  const h1 = words(node, 'h1', '<code>task</code>: subagents as garbage collectors', 96, 124, 1500);
-  const lead = words(node, 'lead', 'A subagent gets its own throwaway context. Only its summary comes back.', 100, 208, 1500);
-  lead.node.style.fontSize = '32px';
+  const h1 = title(node, '<code>task</code>: subagents as garbage collectors', 1500);
+  const lead = sub(node, 'A subagent gets its own throwaway context. Only its summary comes back.', h1, 208);
 
-  const main = pane(node, 96, 320, 800, 520, null, '', 'tui');
+  const MAIN = L([96, 320, 800, 520], [M, 520, CW, 500]);
+  const SUB = L([1000, 320, 824, 520], [M, 1060, CW, 580]);
+  const small = L(19, 24);
+  const main = pane(node, ...MAIN, null, '', 'tui');
   const mainLines = [
     '<span class="user">❯ why do some requests skip auth?</span>',
     '',
@@ -973,14 +1060,14 @@ function taskScene(ctx, start) {
   const result = el('span', 'l', main.pre, '<span class="blk">  JWT middleware, <span class="path">src/auth.rs:120</span>\n  skipped for routes under /health</span>');
   const mainAfter = el('span', 'l', main.pre, '\n<span class="pfx">maki&gt;</span> Found it. /health bypasses the middleware…');
   const mainStatus = el('div', 'abs mono', main.node);
-  Object.assign(mainStatus.style, { left: '0', right: '0', bottom: '0', padding: '10px 24px 12px', borderTop: '1px solid var(--d-com)', fontSize: '19px', color: 'var(--d-com)', display: 'flex', justifyContent: 'space-between' });
+  Object.assign(mainStatus.style, { left: '0', right: '0', bottom: '0', padding: '10px 24px 12px', borderTop: '1px solid var(--d-com)', fontSize: small + 'px', color: 'var(--d-com)', display: 'flex', justifyContent: 'space-between' });
   mainStatus.innerHTML = '<span class="cy" style="font-weight:700">[BUILD]</span><span data-k="ctx">14.2k/200.0k (7%)</span>';
 
-  const sub = pane(node, 1000, 320, 824, 520, null, '', 'tui');
-  const subHead = el('div', 'abs mono', sub.node, '<span class="pu" style="font-weight:700">subagent</span> <span class="co">· own context · model tier</span> <span class="or">weak</span>');
-  Object.assign(subHead.style, { left: '24px', top: '14px', fontSize: '19px' });
-  sub.pre.style.paddingTop = '56px';
-  const subSrc = [
+  const subPane = pane(node, ...SUB, null, '', 'tui');
+  const subHead = el('div', 'abs mono', subPane.node, '<span class="pu" style="font-weight:700">subagent</span> <span class="co">· own context · model tier</span> <span class="or">weak</span>');
+  Object.assign(subHead.style, { left: '24px', top: '14px', fontSize: small + 'px' });
+  subPane.pre.style.paddingTop = L(56, 66) + 'px';
+  const subLines = [
     '<span class="dot">●</span> <span class="tool">glob&gt;</span> <span class="path">src/**/*.rs</span> <span class="ann">(212 files)</span>',
     '<span class="dot">●</span> <span class="tool">grep&gt;</span> jwt|bearer|authorize <span class="ann">(×6)</span>',
     '<span class="dot">●</span> <span class="tool">read&gt;</span> <span class="path">src/auth.rs:88-160</span>',
@@ -991,27 +1078,26 @@ function taskScene(ctx, start) {
     '',
     '<span class="pfx">maki&gt;</span> JWT middleware, src/auth.rs:120,',
     '      skipped for routes under /health',
-  ];
-  const subLines = subSrc.map(h => el('span', 'l', sub.pre, h || ' '));
-  const subCtx = el('div', 'abs mono', sub.node, '');
-  Object.assign(subCtx.style, { right: '24px', bottom: '14px', fontSize: '19px', color: 'var(--d-com)' });
+  ].map(h => el('span', 'l', subPane.pre, h || ' '));
+  const subCtx = el('div', 'abs mono', subPane.node, '');
+  Object.assign(subCtx.style, { right: '24px', bottom: '14px', fontSize: small + 'px', color: 'var(--d-com)' });
 
   // garbage collection: every glyph of the subagent drifts off and fades
-  const gc = el('canvas', 'abs', node);
-  place(gc, 1000, 320, 824, 520);
-  const gctx = gc.getContext('2d');
+  const [, , GW, GH] = SUB;
+  const gc = place(el('canvas', 'abs', node), ...SUB);
   const gr = rng(3);
-  const glyphs = [...Array(420)].map(() => ({ x: gr() * 780 + 20, y: 60 + gr() * 330, vx: (gr() - 0.3) * 140, vy: -40 - gr() * 160, ch: '.:+*#%'[Math.floor(gr() * 6)], d: gr() * 0.5 }));
+  const glyphs = [...Array(420)].map(() => ({ x: gr() * (GW - 44) + 20, y: 60 + gr() * (GH - 190), vx: (gr() - 0.3) * 140, vy: -40 - gr() * 160, ch: '.:+*#%'[Math.floor(gr() * 6)], d: gr() * 0.5 }));
   let zoom = 1;
 
-  const tiers = place(el('div', 'abs', node), 96, 890, 1728);
-  tiers.innerHTML = `<div style="display:flex;gap:14px;align-items:center;white-space:nowrap">
-    <span class="lead" style="font-size:30px;margin-right:8px">The model picks a tier for each subagent:</span>
+  const tiers = place(el('div', 'abs', node), L(96, M), L(890, 1680), L(1728, CW));
+  const tierText = L(30, 36);
+  tiers.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:14px;align-items:center">
+    <span class="lead" style="font-size:${tierText}px;margin-right:8px">The model picks a tier for each subagent:</span>
     <span class="chip mono" data-t="0">weak</span><span class="chip mono" data-t="1">medium</span><span class="chip mono" data-t="2">strong</span>
-    <span class="lead" style="font-size:30px;margin-left:8px">haiku-tier for grep, opus-tier for architecture.</span></div>`;
+    <span class="lead" style="font-size:${tierText}px;margin-left:8px">haiku-tier for grep, opus-tier for architecture.</span></div>`;
   const weak = tiers.querySelector('[data-t="0"]');
-  const gcNote = place(el('div', 'abs', node), 1000, 500, 824);
-  gcNote.innerHTML = '<div style="text-align:center"><div class="stat-big acc" style="font-size:88px">~20k tokens</div><div class="lead" style="font-size:30px">that your main context never saw</div></div>';
+  const gcNote = place(el('div', 'abs', node), SUB[0], SUB[1] + L(180, 200), SUB[2]);
+  gcNote.innerHTML = `<div style="text-align:center"><div class="stat-big acc" style="font-size:${L(88, 96)}px">~20k tokens</div><div class="lead" style="font-size:${L(30, 38)}px">that your main context never saw</div></div>`;
 
   return {
     node,
@@ -1024,30 +1110,24 @@ function taskScene(ctx, start) {
       style(main.node, mIn, 0, (1 - mIn) * 30);
       mainLines.forEach((l, i) => style(l, prog(lt, 1.3 + i * 0.25, 0.3) * (i === 4 ? 1 - prog(lt, 8.4, 0.3) : 1)));
       const back = prog(lt, 8.6, 0.6, ease.outExpo);
-      style(result, back, (1 - back) * 120, 0);
+      style(result, back, L((1 - back) * 120, 0), L(0, (1 - back) * 80));
       style(mainAfter, prog(lt, 9.8, 0.4));
 
       const subIn = prog(lt, 2.4, 0.6, ease.outExpo);
       const collected = prog(lt, 10.2, 0.8, ease.in);
-      style(sub.node, subIn * (1 - collected), (1 - subIn) * 60, 0);
+      style(subPane.node, subIn * (1 - collected), L((1 - subIn) * 60, 0), L(0, (1 - subIn) * 60));
       subLines.forEach((l, i) => style(l, prog(lt, 3.0 + i * 0.42, 0.25)));
-      const subTok = clamp((lt - 3.0) / 4.6) * 20.4;
-      subCtx.innerHTML = `<span class="or">${subTok.toFixed(1)}k</span> tokens in here`;
+      subCtx.innerHTML = `<span class="or">${(clamp((lt - 3.0) / 4.6) * 20.4).toFixed(1)}k</span> tokens in here`;
       const wk = prog(lt, 2.6, 0.4);
       css(weak, 'background', wk > 0.5 ? 'var(--accent)' : 'var(--chip-bg)');
       css(weak, 'color', wk > 0.5 ? 'var(--paper)' : 'var(--chip-fg)');
       style(tiers, prog(lt, 2.4, 0.6));
-      const ctxTok = lerp(14.2, 14.6, back);
-      mainStatus.lastChild.textContent = `${ctxTok.toFixed(1)}k/200.0k (7%)`;
+      mainStatus.lastChild.textContent = `${lerp(14.2, 14.6, back).toFixed(1)}k/200.0k (7%)`;
 
-      const gw = Math.round(824 * zoom * devicePixelRatio);
-      const gh = Math.round(520 * zoom * devicePixelRatio);
-      if (gc.width !== gw || gc.height !== gh) { gc.width = gw; gc.height = gh; }
-      gctx.setTransform(gw / 824, 0, 0, gh / 520, 0, 0);
-      gctx.clearRect(0, 0, 824, 520);
+      const gctx = fitCanvas(gc, GW, GH, zoom);
       const gp = lt - 10.2;
       if (gp > 0 && gp < 3) {
-        gctx.font = '20px "JetBrains Mono"';
+        gctx.font = `${L(20, 26)}px "JetBrains Mono"`;
         for (const g of glyphs) {
           const tt = Math.max(0, gp - g.d);
           const o = clamp(1 - tt / 1.6) * clamp(gp / 0.3);
@@ -1068,23 +1148,25 @@ function taskScene(ctx, start) {
 
 function restScene(ctx, start) {
   const node = scene(ctx.stage);
-  const h1 = words(node, 'h1', 'And the smaller tricks add up.', 96, 124, 1500);
+  const h1 = title(node, 'And the smaller tricks add up.', 1500);
   const COL_W = 540;
+  // tall: one at a time, each drawing zoomed up to the width of the screen
+  const VIS_ZOOM = L(1, 1.6);
   const cols = [
     ['tool_search', 'An MCP server with 100 tools puts 100 definitions in every request.', 'maki loads one search tool, then only the matches.'],
     ['batch', 'Independent tool calls go out in one turn.', 'One request, N results. Every round-trip re-sends the context.'],
     ['compaction', 'Long session? Images and thinking go first.', 'Then old turns get summarized, and the multiplier resets.'],
   ].map(([name, a, b], i) => {
     const x = 96 + i * (COL_W + 62);
-    const col = place(el('div', 'abs', node), x, 620, COL_W);
-    col.innerHTML = `<div class="mono acc" style="font-size:28px;font-weight:600;margin-bottom:14px">${name}</div><div class="say" style="font-size:31px;line-height:1.36">${a}</div><div class="lead" style="font-size:28px;margin-top:10px">${b}</div>`;
-    const vis = place(el('div', 'abs', node), x, 280, COL_W, 300);
+    const col = place(el('div', 'abs', node), L(x, M), L(620, 1160), L(COL_W, CW));
+    col.innerHTML = `<div class="mono acc" style="font-size:${L(28, 40)}px;font-weight:600;margin-bottom:14px">${name}</div><div class="say" style="font-size:${L(31, 48)}px;line-height:1.36">${a}</div><div class="lead" style="font-size:${L(28, 40)}px;margin-top:10px">${b}</div>`;
+    const vis = place(el('div', 'abs', node), L(x, 108 / VIS_ZOOM), L(280, 560 / VIS_ZOOM), COL_W, 300);
+    vis.style.zoom = VIS_ZOOM;
     return { col, vis };
   });
 
   // tool_search: a grid of 100 tool definitions folds into one
-  const g = el('div', 'abs', cols[0].vis);
-  place(g, 0, 0, COL_W, 300);
+  const g = place(el('div', 'abs', cols[0].vis), 0, 0, COL_W, 300);
   const dots = [...Array(100)].map((_, i) => {
     const d = el('div', 'abs', g);
     const cx = (i % 20) * 26 + 14;
@@ -1096,7 +1178,7 @@ function restScene(ctx, start) {
   const gridCap = el('div', 'abs mono', g, '');
   Object.assign(gridCap.style, { left: '0', top: '0', fontSize: '20px', color: 'var(--ink-3)' });
   const search = el('div', 'abs chip mono', g, 'tool_search');
-  Object.assign(search.style, { left: '176px', top: '112px' });
+  Object.assign(search.style, { left: '176px', top: '112px', fontSize: '22px' });
   const hits = ['datadog.query_metrics', 'datadog.get_monitor'].map((n, i) => {
     const c = el('div', 'abs chip mono', g, n);
     Object.assign(c.style, { left: '60px', top: 196 + i * 50 + 'px', fontSize: '19px' });
@@ -1104,8 +1186,7 @@ function restScene(ctx, start) {
   });
 
   // batch: four arrows, one request
-  const b = el('div', 'abs', cols[1].vis);
-  place(b, 0, 0, COL_W, 300);
+  const b = place(el('div', 'abs', cols[1].vis), 0, 0, COL_W, 300);
   b.innerHTML = `<svg width="${COL_W}" height="300" style="overflow:visible">
     ${[0, 1, 2, 3].map(i => `<g data-i="${i}"><rect x="20" y="${30 + i * 64}" width="150" height="44" rx="6" fill="var(--chip-bg)" stroke="var(--chip-border)"/><text x="95" y="${58 + i * 64}" text-anchor="middle" font-family="JetBrains Mono" font-size="19" fill="var(--chip-fg)">${['read a.rs', 'read b.rs', 'grep TODO', 'glob *.md'][i]}</text>
     <path d="M178 ${52 + i * 64} C 260 ${52 + i * 64}, 280 150, 350 150" fill="none" stroke="var(--accent)" stroke-width="2.5" pathLength="1" stroke-dasharray="1 1"/></g>`).join('')}
@@ -1116,11 +1197,10 @@ function restScene(ctx, start) {
   const bReq = [b.querySelector('[data-k="req"]'), b.querySelector('[data-k="reqt"]')];
 
   // compaction: a tall context bar gets squeezed
-  const c = el('div', 'abs', cols[2].vis);
-  place(c, 0, 0, COL_W, 300);
+  const c = place(el('div', 'abs', cols[2].vis), 0, 0, COL_W, 300);
   const segs = [
     ['summary of turns 1-30', 'var(--ink-3)'], ['images', 'var(--t-con)'], ['thinking', 'var(--t-kw)'], ['old turns', 'var(--t-ty)'], ['recent turns', 'var(--t-str)'],
-  ].map(([label, color], i) => {
+  ].map(([label, color]) => {
     const s = el('div', 'abs', c);
     Object.assign(s.style, { left: '40px', width: '300px', background: color, borderRadius: '4px', overflow: 'hidden', color: '#1e1e2e', fontFamily: 'var(--font-mono)', fontSize: '18px', padding: '0 10px', display: 'flex', alignItems: 'center' });
     s.textContent = label;
@@ -1129,20 +1209,21 @@ function restScene(ctx, start) {
   const barLabel = el('div', 'abs mono', c, '');
   Object.assign(barLabel.style, { left: '360px', top: '0', fontSize: '20px', color: 'var(--ink-2)' });
 
+  const BEAT = [0.9, 5.4, 9.9];
   return {
     node,
     render(lt) {
       style(node, 1 - prog(lt, 15.8, 0.7, ease.in));
       showWords(h1, lt, 0.2, 17);
-      const BEAT = [0.9, 5.4, 9.9];
       cols.forEach(({ col, vis }, i) => {
         const a = prog(lt, BEAT[i], 0.8, ease.outExpo);
-        style(col, a, 0, (1 - a) * 30);
-        style(vis, a);
+        const gone = P && i < BEAT.length - 1 ? prog(lt, BEAT[i + 1] - 0.45, 0.35, ease.in) : 0;
+        style(col, a * (1 - gone), 0, (1 - a) * 30);
+        style(vis, a * (1 - gone));
       });
       text(gridCap, lt < 3.6 ? 'an MCP server: 100 tool definitions' : '1 definition, 2 loaded on demand');
       const fold = prog(lt, 3.2, 1.4, ease.inOutExpo);
-      dots.forEach((d, i) => {
+      dots.forEach(d => {
         const [cx, cy] = d._c;
         style(d, 1 - fold * 0.95, (230 - cx) * fold, (112 - cy) * fold, 1 - fold * 0.6);
       });
@@ -1161,9 +1242,7 @@ function restScene(ctx, start) {
       for (const e of bReq) style(e, clamp(rq));
 
       const squeeze = prog(lt, 11.6, 1.6, ease.inOutExpo);
-      const heights = [
-        lerp(0, 46, squeeze), lerp(52, 0, squeeze), lerp(58, 0, squeeze), lerp(92, 0, squeeze), 56,
-      ];
+      const heights = [lerp(0, 46, squeeze), lerp(52, 0, squeeze), lerp(58, 0, squeeze), lerp(92, 0, squeeze), 56];
       let y = 20 + lerp(0, 190, squeeze) * 0.5;
       segs.forEach((s, i) => {
         s.style.top = y + 'px';
@@ -1172,8 +1251,7 @@ function restScene(ctx, start) {
         y += heights[i] + (heights[i] > 1 ? 4 : 0);
       });
       style(c, prog(lt, 10.2, 0.5));
-      const total = Math.round(lerp(174, 58, squeeze));
-      text(barLabel, `${total}k tokens`);
+      text(barLabel, `${Math.round(lerp(174, 58, squeeze))}k tokens`);
       barLabel.style.top = 20 + lerp(0, 95, squeeze) + 'px';
     },
   };
@@ -1195,46 +1273,54 @@ const BENCH = [
   ['OpenCode', 50.0, 3.24, '#b88af0'],
   ['Hermes', 50.0, 2.9, '#b0b0b0'],
 ];
+// a narrow chart has room to name only the ends of the field
+const BENCH_NAMED_TALL = new Set(['Codex', 'Claude Code', 'Exo Harness']);
 
 function benchScene(ctx, start) {
   const node = scene(ctx.stage);
-  const h1 = words(node, 'h1', 'Highest pass rate of 13 harnesses.', 96, 124, 1100);
-  const lead = words(node, 'lead', 'Second-lowest cost per pass. FrontierHarness Eval v1.0, 30 tasks.', 100, 208, 1100);
-  lead.node.style.fontSize = '32px';
+  const h1 = title(node, 'Highest pass rate of 13 harnesses.', 1100);
+  const lead = sub(node, 'Second-lowest cost per pass. FrontierHarness Eval v1.0, 30 tasks.', h1, 208, 1100);
 
-  const CH = [210, 300, 1500, 600];
-  const [cx, cy, cw, chh] = CH;
+  const [cx, cy, cw, chh] = L([210, 300, 1500, 600], [170, 580, 820, 820]);
+  const axis = L(22, 26);
   const xOf = cost => cx + ((Math.log10(cost) - Math.log10(0.9)) / (Math.log10(22) - Math.log10(0.9))) * cw;
   const yOf = pct => cy + chh - ((pct - 48) / (72 - 48)) * chh;
   let svg = `<svg width="${W}" height="${H}" style="position:absolute;inset:0;overflow:visible">`;
   svg += '<g data-k="grid">';
-  for (const c of [1, 2, 5, 10, 20]) svg += `<line x1="${xOf(c)}" y1="${cy}" x2="${xOf(c)}" y2="${cy + chh}" stroke="var(--rule)" stroke-dasharray="5 6"/><text x="${xOf(c)}" y="${cy + chh + 40}" text-anchor="middle" font-family="JetBrains Mono" font-size="22" fill="var(--ink-3)">$${c}</text>`;
-  for (const p of [50, 55, 60, 65, 70]) svg += `<line x1="${cx}" y1="${yOf(p)}" x2="${cx + cw}" y2="${yOf(p)}" stroke="var(--rule)" stroke-dasharray="5 6"/><text x="${cx - 20}" y="${yOf(p) + 8}" text-anchor="end" font-family="JetBrains Mono" font-size="22" fill="var(--ink-3)">${p}%</text>`;
-  svg += `<text x="${cx + cw / 2}" y="${cy + chh + 86}" text-anchor="middle" font-family="JetBrains Mono" font-size="22" fill="var(--ink-2)">cost per pass (log scale)</text>`;
-  svg += `<text x="${cx - 110}" y="${cy + chh / 2}" text-anchor="middle" font-family="JetBrains Mono" font-size="22" fill="var(--ink-2)" transform="rotate(-90 ${cx - 110} ${cy + chh / 2})">pass rate</text>`;
+  for (const c of [1, 2, 5, 10, 20]) svg += `<line x1="${xOf(c)}" y1="${cy}" x2="${xOf(c)}" y2="${cy + chh}" stroke="var(--rule)" stroke-dasharray="5 6"/><text x="${xOf(c)}" y="${cy + chh + 40}" text-anchor="middle" font-family="JetBrains Mono" font-size="${axis}" fill="var(--ink-3)">$${c}</text>`;
+  for (const p of [50, 55, 60, 65, 70]) svg += `<line x1="${cx}" y1="${yOf(p)}" x2="${cx + cw}" y2="${yOf(p)}" stroke="var(--rule)" stroke-dasharray="5 6"/><text x="${cx - 20}" y="${yOf(p) + 8}" text-anchor="end" font-family="JetBrains Mono" font-size="${axis}" fill="var(--ink-3)">${p}%</text>`;
+  svg += `<text x="${cx + cw / 2}" y="${cy + chh + 86}" text-anchor="middle" font-family="JetBrains Mono" font-size="${axis}" fill="var(--ink-2)">cost per pass (log scale)</text>`;
+  const px = cx - L(110, 130);
+  svg += `<text x="${px}" y="${cy + chh / 2}" text-anchor="middle" font-family="JetBrains Mono" font-size="${axis}" fill="var(--ink-2)" transform="rotate(-90 ${px} ${cy + chh / 2})">pass rate</text>`;
   svg += '</g>';
   BENCH.forEach(([name, pct, cost, color], i) => {
     const x = xOf(cost);
     const y = yOf(pct);
-    const left = ['DSH Creator', 'Claude Code', 'Pi', 'Kimi Code', 'Hermes'].includes(name);
-    const dy = { 'DSH Standard': 34, 'DSH Minimal': 38, 'Oh My Pi': -14 }[name] ?? 7;
     const tone = `color-mix(in oklch, ${color}, var(--ink) var(--pt-mix))`;
-    svg += `<g data-p="${i}"><circle cx="${x}" cy="${y}" r="9" style="fill:${tone}"/><text x="${x + (left ? -18 : 18)}" y="${y + dy}" text-anchor="${left ? 'end' : 'start'}" font-family="Nunito" font-weight="700" font-size="21" style="fill:${tone}">${name} <tspan font-family="JetBrains Mono" font-weight="400" font-size="17" fill="var(--ink-3)">${pct}% · $${cost.toFixed(2)}</tspan></text></g>`;
+    let label = '';
+    if (!P || BENCH_NAMED_TALL.has(name)) {
+      const left = ['DSH Creator', 'Claude Code', 'Pi', 'Kimi Code', 'Hermes'].includes(name);
+      const dy = P ? 10 : { 'DSH Standard': 34, 'DSH Minimal': 38, 'Oh My Pi': -14 }[name] ?? 7;
+      label = `<text x="${x + (left ? -18 : 18)}" y="${y + dy}" text-anchor="${left ? 'end' : 'start'}" font-family="Nunito" font-weight="700" font-size="${L(21, 30)}" style="fill:${tone}">${name} <tspan font-family="JetBrains Mono" font-weight="400" font-size="${L(17, 24)}" fill="var(--ink-3)">${pct}% · $${cost.toFixed(2)}</tspan></text>`;
+    }
+    svg += `<g data-p="${i}"><circle cx="${x}" cy="${y}" r="${L(9, 12)}" style="fill:${tone}"/>${label}</g>`;
   });
   const mx = xOf(2.06);
   const my = yOf(70);
   svg += `<g data-k="maki"><circle data-k="ring" cx="${mx}" cy="${my}" r="30" fill="oklch(75% 0.12 45 / 0.14)" stroke="var(--accent)" stroke-width="2"/>
     <path d="M${mx} ${my - 16} L${mx + 4.7} ${my - 5.2} L${mx + 16} ${my - 4.9} L${mx + 7.2} ${my + 2.4} L${mx + 10.2} ${my + 13.6} L${mx} ${my + 7.2} L${mx - 10.2} ${my + 13.6} L${mx - 7.2} ${my + 2.4} L${mx - 16} ${my - 4.9} L${mx - 4.7} ${my - 5.2}Z" fill="var(--accent)"/>
-    <text x="${mx + 48}" y="${my - 4}" font-family="Nunito" font-weight="800" font-size="34" fill="var(--accent)">maki 0.5.5</text>
-    <text x="${mx + 48}" y="${my + 30}" font-family="JetBrains Mono" font-size="22" fill="var(--ink)">70.0% · $2.06 per pass</text></g>`;
+    <text x="${mx + 48}" y="${my - 4}" font-family="Nunito" font-weight="800" font-size="${L(34, 44)}" fill="var(--accent)">maki 0.5.5</text>
+    <text x="${mx + 48}" y="${my + L(30, 38)}" font-family="JetBrains Mono" font-size="${L(22, 28)}" fill="var(--ink)">70.0% · $2.06 per pass</text></g>`;
   svg += '</svg>';
   const chart = el('div', 'layer', node, svg);
   const grid = chart.querySelector('[data-k="grid"]');
   const points = [...chart.querySelectorAll('[data-p]')];
   const maki = chart.querySelector('[data-k="maki"]');
   const ring = chart.querySelector('[data-k="ring"]');
-  const foot = place(el('div', 'abs note', node, 'cost per pass = model cost across all 30 tasks, failures included / tasks passed · source: frontierharness.org, report.zip in the v0.5.5 release'), 96, 1024, 1700);
-  foot.style.fontSize = '17px';
+  const unnamed = P ? place(el('div', 'abs mono', node, '9 more between 50% and 63.3%, $2.43 to $4.75 per pass'), M, cy + chh + 130, CW) : null;
+  if (unnamed) Object.assign(unnamed.style, { fontSize: '26px', color: 'var(--ink-2)' });
+  const foot = place(el('div', 'abs note', node, 'cost per pass = model cost across all 30 tasks, failures included / tasks passed · source: frontierharness.org, report.zip in the v0.5.5 release'), L(96, M), L(1024, 1700), L(1700, CW));
+  foot.style.fontSize = L(17, 22) + 'px';
 
   return {
     node,
@@ -1252,6 +1338,7 @@ function benchScene(ctx, start) {
       const pulse = (lt - 4.2) % 2.2;
       ring.setAttribute('r', 22 + (lt > 4.2 ? pulse * 12 : 8));
       ring.style.opacity = lt > 4.2 ? String(clamp(1 - pulse / 2.2)) : '1';
+      if (unnamed) style(unnamed, prog(lt, 3.0, 0.8));
       style(foot, prog(lt, 1.2, 0.8));
     },
   };
@@ -1290,48 +1377,50 @@ const DOOM_CLIPS = [['doom-av1.mp4', 'video/mp4; codecs=av01.0.04M.08'], ['doom.
 
 function luaScene(ctx, start) {
   const node = scene(ctx.stage);
-  const h1 = words(node, 'h1', 'Hackable all the way down.', 96, 124, 1500);
-  const lead = words(node, 'lead', 'Every built-in tool is a Lua plugin. <code>read</code>, <code>bash</code>, <code>edit</code>, even <code>batch</code>.', 100, 208, 1500);
-  lead.node.style.fontSize = '32px';
+  const h1 = title(node, 'Hackable all the way down.', 1500);
+  const lead = sub(node, 'Every built-in tool is a Lua plugin. <code>read</code>, <code>bash</code>, <code>edit</code>, even <code>batch</code>.', h1, 208);
+  const BODY_Y = L(310, 560);
 
-  const tree = place(el('div', 'abs', node), 100, 310, 1700);
-  tree.innerHTML = `<div class="mono dim" style="font-size:24px;margin-bottom:18px">./plugins/</div>`;
+  const tree = place(el('div', 'abs', node), L(100, M), BODY_Y, L(1720, CW));
+  tree.innerHTML = `<div class="mono dim" style="font-size:${L(24, 30)}px;margin-bottom:18px">./plugins/</div>`;
   const chips = el('div', '', tree);
-  Object.assign(chips.style, { display: 'flex', flexWrap: 'wrap', gap: '14px', maxWidth: '1500px' });
+  Object.assign(chips.style, { display: 'flex', flexWrap: 'wrap', gap: '14px' });
   const pChips = PLUGINS.map(p => {
     const c = el('span', 'chip mono', chips, p + '/');
-    Object.assign(c.style, { fontSize: '28px', padding: '10px 22px' });
+    Object.assign(c.style, { fontSize: L(28, 30) + 'px', padding: L('10px 22px', '8px 18px') });
     return c;
   });
-  chips.style.maxWidth = '1720px';
   const treeNote = el('div', 'lead', tree, 'Read them, then copy one to start your own. Your plugins get the same API.');
-  Object.assign(treeNote.style, { fontSize: '30px', marginTop: '26px' });
+  Object.assign(treeNote.style, { fontSize: L(30, 40) + 'px', marginTop: '26px' });
 
-  const h1b = words(node, 'h1', 'The API mirrors Neovim.', 96, 124, 1500);
-  const leadb = words(node, 'lead', 'If you have written a Neovim plugin, you already know most of it.', 100, 208, 1500);
-  leadb.node.style.fontSize = '32px';
-  const map = place(el('div', 'abs', node), 100, 320, 1720);
+  const h1b = title(node, 'The API mirrors Neovim.', 1500);
+  const leadb = sub(node, 'If you have written a Neovim plugin, you already know most of it.', h1b, 208);
+  const map = place(el('div', 'abs', node), L(100, M), L(320, BODY_Y), L(1720, CW));
+  // wide: vim on the left, maki on the right. tall: maki under vim
   const rows = NVIM_MAP.map(([from, to]) => {
     const row = el('div', '', map);
-    Object.assign(row.style, { display: 'grid', gridTemplateColumns: '560px 120px 1fr', alignItems: 'baseline', fontFamily: 'var(--font-mono)', fontSize: '40px', lineHeight: '1.75' });
     const a = el('span', 'dim', row, from);
-    a.style.textAlign = 'right';
     const arrow = el('span', 'acc', row, '→');
-    arrow.style.textAlign = 'center';
     const b = el('span', '', row, '');
-    return { row, a, arrow, b, to };
+    if (P) {
+      Object.assign(row.style, { fontFamily: 'var(--font-mono)', fontSize: '38px', lineHeight: '1.35', marginBottom: '26px' });
+      a.style.display = 'block';
+      arrow.style.marginRight = '18px';
+    } else {
+      Object.assign(row.style, { display: 'grid', gridTemplateColumns: '560px 120px 1fr', alignItems: 'baseline', fontFamily: 'var(--font-mono)', fontSize: '40px', lineHeight: '1.75' });
+      a.style.textAlign = 'right';
+      arrow.style.textAlign = 'center';
+    }
+    return { row, arrow, b, to };
   });
 
-  const h1c = words(node, 'h1', 'Give the model a new tool in 15 lines.', 96, 124, 1500);
-  const leadc = words(node, 'lead', 'Save it in <code>~/.config/maki/lua/</code>, <code>require</code> it from <code>init.lua</code>, <code>/reload</code>. The model can call it.', 100, 208, 1720);
-  leadc.node.style.fontSize = '32px';
-  const code = pane(node, 96, 300, 1010, PANE_HEAD + PRE_PAD * 2 + CI_TOOL.length * CODE_LH, 'lua/ci_status.lua', 'Luau');
-  code.pre.style.lineHeight = CODE_LH + 'px';
-  code.pre.style.fontSize = '19.5px';
+  const h1c = title(node, 'Give the model a new tool in 15 lines.', 1500);
+  const leadc = sub(node, 'Save it in <code>~/.config/maki/lua/</code>, <code>require</code> it from <code>init.lua</code>, <code>/reload</code>. The model can call it.', h1c, 208, 1720);
+  const [CODE_FONT, CODE_LINE] = L([19.5, CODE_LH], [25, 34]);
+  const code = codePane(node, L(96, M), L(300, 560), L(1010, CW), CI_TOOL, CODE_FONT, CODE_LINE, 'lua/ci_status.lua', 'Luau');
   const codeLines = lines(code.pre, CI_TOOL);
-  const caret = caretFor(code.pre, 19.5);
-  caret.style.color = 'var(--t-ink)';
-  const run = pane(node, 1150, 300, 674, 520, null, '', 'tui');
+  const caret = caretFor(code.pre, CODE_FONT);
+  const run = pane(node, ...L([1150, 300, 674, 520], [M, 1210, CW, 560]), null, '', 'tui');
   const runLines = [
     '<span class="user">❯ is main green?</span>',
     '',
@@ -1346,10 +1435,11 @@ function luaScene(ctx, start) {
     '<span class="pfx">maki&gt;</span> No. <span class="code">test (ubuntu)</span> failed on main.',
   ].map(h => el('span', 'l', run.pre, h || ' '));
 
-  const doomLine = words(node, 'h1', 'And yes... it can even run DOOM.', 96, 116, 1500);
-  const doomSub = words(node, 'lead', 'A Lua plugin, drawing into a maki window with half-block cells.', 100, 196, 1500);
-  doomSub.node.style.fontSize = '30px';
-  const DOOM = [180, 262, 1560, 788];
+  const doomLine = words(node, 'h1', 'And yes... it can even run DOOM.', L(96, M), L(116, 150), L(1500, CW));
+  const doomSub = sub(node, 'A Lua plugin, drawing into a maki window with half-block cells.', doomLine, 196);
+  if (!P) doomSub.node.style.fontSize = '30px';
+  // tall: edge to edge, cropping the chat either side of the game
+  const DOOM = L([180, 262, 1560, 788], [24, 680, 1032, 640]);
   const doomBox = place(el('div', 'abs', node), ...DOOM);
   Object.assign(doomBox.style, { borderRadius: '10px', overflow: 'hidden', boxShadow: 'var(--pane-shadow)', background: '#16171F' });
   const video = el('video', '', doomBox);
@@ -1384,6 +1474,10 @@ function luaScene(ctx, start) {
         video.currentTime = target;
       });
     },
+    dispose() {
+      video.pause();
+      if (video.src) URL.revokeObjectURL(video.src);
+    },
   };
 
   const s = {
@@ -1404,7 +1498,7 @@ function luaScene(ctx, start) {
       showWords(h1b, lt, 7.4, 14.4);
       showWords(leadb, lt, 8.0, 14.4, { stagger: 0.025 });
       style(map, 1 - prog(lt, 14.0, 0.4));
-      rows.forEach(({ row, a, arrow, b, to }, i) => {
+      rows.forEach(({ row, arrow, b, to }, i) => {
         const at = 8.6 + i * 0.55;
         const p = prog(lt, at, 0.5, ease.outExpo);
         style(row, p, 0, (1 - p) * 18);
@@ -1425,7 +1519,7 @@ function luaScene(ctx, start) {
       style(code.node, cIn * (1 - prog(lt, 23.8, 0.4)), 0, (1 - cIn) * 30);
       typeLines(codeLines, prog(lt, 15.8, 3.6, ease.linear), caret);
       const rIn = prog(lt, 19.6, 0.6);
-      style(run.node, rIn * (1 - prog(lt, 23.8, 0.4)), (1 - rIn) * 40, 0);
+      style(run.node, rIn * (1 - prog(lt, 23.8, 0.4)), L((1 - rIn) * 40, 0), L(0, (1 - rIn) * 40));
       runLines.forEach((l, i) => style(l, prog(lt, 19.9 + (i < 3 ? i * 0.3 : 1.2 + i * 0.12), 0.3)));
 
       showWords(doomLine, lt, DOOM_AT - 0.2, 33.4, { stagger: 0.05 });
@@ -1447,61 +1541,89 @@ function luaScene(ctx, start) {
 
 // ---------------------------------------------------------------- 10. permissions
 
+// the tree-sitter-bash parse of the command, as :InspectTree would print it
+const BASH_TREE = [
+  ['program', ''],
+  ['└─ list', ''],
+  ['   ├─ command', ''],
+  ['   │  ├─ command_name: git', 'git'],
+  ['   │  └─ argument: diff', ''],
+  ['   ├─ &&', ''],
+  ['   └─ command', ''],
+  ['      ├─ command_name: rm', 'rm'],
+  ['      └─ arguments: -rf /', ''],
+];
+
 function permScene(ctx, start) {
   const node = scene(ctx.stage);
-  const h1 = words(node, 'h1', 'Permissions that read the whole command.', 96, 124, 1500);
-  const lead = words(node, 'lead', 'Bash is parsed with tree-sitter, so maki knows what is actually being run.', 100, 208, 1500);
-  lead.node.style.fontSize = '32px';
+  const h1 = title(node, 'Permissions that read the whole command.', 1500);
+  const lead = sub(node, 'Bash is parsed with tree-sitter, so maki knows what is actually being run.', h1, 208);
 
-  const cmdBox = place(el('div', 'abs', node), 96, 310, 1728);
-  cmdBox.innerHTML = '<div class="mono" style="font-size:52px;color:var(--ink)"><span class="acc">$</span> <span data-k="c1">git diff</span> <span class="dim">&amp;&amp;</span> <span data-k="c2">rm -rf /</span></div>';
+  const cmdBox = place(el('div', 'abs', node), L(96, M), L(310, 530), L(1728, CW));
+  cmdBox.innerHTML = `<div class="mono" style="font-size:${L(52, 56)}px;color:var(--ink)"><span class="acc">$</span> <span data-k="c1">git diff</span> <span class="dim">&amp;&amp;</span> <span data-k="c2">rm -rf /</span></div>`;
   const c1 = cmdBox.querySelector('[data-k="c1"]');
   const c2 = cmdBox.querySelector('[data-k="c2"]');
 
-  // the tree-sitter-bash tree for the line above
-  const T = [
-    ['program', 860, 470],
-    ['list', 860, 560],
-    ['command', 520, 660],
-    ['&&', 860, 660],
-    ['command', 1200, 660],
-    ['command_name: git', 400, 760],
-    ['argument: diff', 660, 760],
-    ['command_name: rm', 1080, 760],
-    ['arguments: -rf /', 1360, 760],
-  ];
-  const E = [[0, 1], [1, 2], [1, 3], [1, 4], [2, 5], [2, 6], [4, 7], [4, 8]];
-  let svg = `<svg width="${W}" height="${H}" style="position:absolute;inset:0;overflow:visible">`;
-  E.forEach(([a, b], i) => {
-    svg += `<path data-e="${i}" d="M${T[a][1]} ${T[a][2] + 22} C ${T[a][1]} ${T[a][2] + 60}, ${T[b][1]} ${T[b][2] - 60}, ${T[b][1]} ${T[b][2] - 22}" fill="none" stroke="var(--ink-3)" stroke-width="2" pathLength="1" stroke-dasharray="1 1"/>`;
-  });
-  svg += '</svg>';
-  const treeSvg = el('div', 'layer', node, svg);
-  const edges = [...treeSvg.querySelectorAll('path')];
-  const nodes = T.map(([label, x, y], i) => {
-    const n = el('div', 'abs mono', node, esc(label));
-    const leaf = i >= 5;
-    Object.assign(n.style, {
-      left: x + 'px', top: y + 'px', transform: 'translate(-50%, -50%)', fontSize: '24px', padding: '6px 16px', borderRadius: '6px',
-      background: leaf ? 'var(--pane-bg)' : 'var(--chip-bg)', color: leaf ? 'var(--t-ink)' : 'var(--ink-2)', border: '1px solid ' + (leaf ? 'var(--pane-line)' : 'var(--chip-border)'), whiteSpace: 'nowrap',
+  // wide: the parse as a node graph. tall: the same parse as indented text
+  const edges = [];
+  const nodes = [];
+  let gitNode;
+  let rmNode;
+  if (P) {
+    const pre = place(el('pre', 'abs mono', node), M, 660, CW);
+    Object.assign(pre.style, { fontSize: '34px', lineHeight: '50px', color: 'var(--ink-2)' });
+    for (const [line, cmd] of BASH_TREE) {
+      const n = el('span', 'l', pre, esc(line));
+      if (cmd === 'git') gitNode = n;
+      if (cmd === 'rm') rmNode = n;
+      nodes.push(n);
+    }
+  } else {
+    const T = [
+      ['program', 860, 470],
+      ['list', 860, 560],
+      ['command', 520, 660],
+      ['&&', 860, 660],
+      ['command', 1200, 660],
+      ['command_name: git', 400, 760],
+      ['argument: diff', 660, 760],
+      ['command_name: rm', 1080, 760],
+      ['arguments: -rf /', 1360, 760],
+    ];
+    const E = [[0, 1], [1, 2], [1, 3], [1, 4], [2, 5], [2, 6], [4, 7], [4, 8]];
+    let svg = `<svg width="${W}" height="${H}" style="position:absolute;inset:0;overflow:visible">`;
+    E.forEach(([a, b], i) => {
+      svg += `<path data-e="${i}" d="M${T[a][1]} ${T[a][2] + 22} C ${T[a][1]} ${T[a][2] + 60}, ${T[b][1]} ${T[b][2] - 60}, ${T[b][1]} ${T[b][2] - 22}" fill="none" stroke="var(--ink-3)" stroke-width="2" pathLength="1" stroke-dasharray="1 1"/>`;
     });
-    n._leaf = leaf;
-    return n;
-  });
+    const treeSvg = el('div', 'layer', node, svg + '</svg>');
+    edges.push(...treeSvg.querySelectorAll('path'));
+    T.forEach(([label, x, y], i) => {
+      const n = el('div', 'abs mono', node, esc(label));
+      const leaf = i >= 5;
+      Object.assign(n.style, {
+        left: x + 'px', top: y + 'px', transform: 'translate(-50%, -50%)', fontSize: '24px', padding: '6px 16px', borderRadius: '6px',
+        background: leaf ? 'var(--pane-bg)' : 'var(--chip-bg)', color: leaf ? 'var(--t-ink)' : 'var(--ink-2)', border: '1px solid ' + (leaf ? 'var(--pane-line)' : 'var(--chip-border)'), whiteSpace: 'nowrap',
+      });
+      nodes.push(n);
+    });
+    gitNode = nodes[5];
+    rmNode = nodes[7];
+  }
 
-  const verdict = place(el('div', 'abs', node), 96, 850, 1728);
-  verdict.innerHTML = `<div style="display:grid;grid-template-columns:1fr 1fr;gap:60px">
-    <div><div class="mono dim" style="font-size:22px">most agents</div><div class="say" style="font-size:40px">only see <span class="mono" style="font-size:36px">git&nbsp;*</span></div></div>
-    <div><div class="mono acc" style="font-size:22px">maki</div><div class="say" style="font-size:40px">checks <span class="mono" style="font-size:36px">git&nbsp;*</span> and <span class="mono acc" style="font-size:36px">rm&nbsp;*</span> on their own</div></div>
+  const say = L(40, 46);
+  const monoSay = L(36, 42);
+  const verdict = place(el('div', 'abs', node), L(96, M), L(850, 1160), L(1728, CW));
+  verdict.innerHTML = `<div style="display:grid;grid-template-columns:${L('1fr 1fr', '1fr')};gap:${L(60, 36)}px">
+    <div><div class="mono dim" style="font-size:${L(22, 28)}px">most agents</div><div class="say" style="font-size:${say}px">only see <span class="mono" style="font-size:${monoSay}px">git&nbsp;*</span></div></div>
+    <div><div class="mono acc" style="font-size:${L(22, 28)}px">maki</div><div class="say" style="font-size:${say}px">checks <span class="mono" style="font-size:${monoSay}px">git&nbsp;*</span> and <span class="mono acc" style="font-size:${monoSay}px">rm&nbsp;*</span> on their own</div></div>
   </div>`;
   const vParts = [...verdict.firstChild.children];
 
-  const prompt = place(el('div', 'tui', node), 1060, 320, 764, 0);
-  prompt.innerHTML = `<pre style="font-size:22px;line-height:1.5;padding:22px 26px"><span class="or" style="font-weight:700">bash&gt;</span> rm -rf /  <span class="co">needs permission</span>
+  const prompt = place(el('div', 'tui', node), L(1060, M), L(320, 1510), L(764, CW));
+  prompt.innerHTML = `<pre style="font-size:${L(22, 27)}px;line-height:1.5;padding:22px 26px"><span class="or" style="font-weight:700">bash&gt;</span> rm -rf /  <span class="co">needs permission</span>
 <span class="gr" style="font-weight:700">y</span> <span class="co">once</span>  <span class="gr" style="font-weight:700">s</span> <span class="co">session</span>  <span class="gr" style="font-weight:700">a</span> <span class="co">always here</span>  <span class="re" style="font-weight:700">n</span> <span class="co">deny, say why</span></pre>`;
-  prompt.style.height = 'auto';
-  const handles = place(el('div', 'abs note', node, 'also handles pipes, subshells and command substitution · per-tool allow/deny rules · --yolo skips it all'), 96, 1010, 1700);
-  handles.style.fontSize = '19px';
+  const handles = place(el('div', 'abs note', node, 'also handles pipes, subshells and command substitution · per-tool allow/deny rules · --yolo skips it all'), L(96, M), L(1010, 1700), L(1700, CW));
+  handles.style.fontSize = L(19, 26) + 'px';
 
   return {
     node,
@@ -1511,22 +1633,29 @@ function permScene(ctx, start) {
       showWords(lead, lt, 0.8, 14, { stagger: 0.022 });
       const cin = prog(lt, 1.2, 0.6, ease.outExpo);
       style(cmdBox, cin, 0, (1 - cin) * 20);
-      const lit = prog(lt, 4.6, 0.5);
-      css(c1, 'color', lit > 0.5 ? 'var(--good)' : 'var(--ink)');
-      css(c2, 'color', lit > 0.5 ? 'var(--accent)' : 'var(--ink)');
-      const treeOut = 1;
+      const lit = prog(lt, 4.6, 0.5) > 0.5;
+      css(c1, 'color', lit ? 'var(--good)' : 'var(--ink)');
+      css(c2, 'color', lit ? 'var(--accent)' : 'var(--ink)');
       edges.forEach((e, i) => {
         const p = prog(lt, 2.2 + i * 0.12, 0.5, ease.inOut);
         css(e, 'stroke-dashoffset', (1 - p).toFixed(3));
-        style(e, (p > 0 ? 1 : 0) * treeOut);
+        style(e, p > 0 ? 1 : 0);
       });
       nodes.forEach((n, i) => {
         const p = prog(lt, 2.0 + i * 0.13, 0.4, ease.outExpo);
-        n.style.opacity = p * treeOut;
-        n.style.transform = `translate(-50%, calc(-50% + ${(1 - p) * 14}px))`;
-        if (n._leaf && i === 7) css(n, 'border-color', lit > 0.5 ? 'var(--accent)' : 'var(--pane-line)');
-        if (n._leaf && i === 5) css(n, 'border-color', lit > 0.5 ? 'var(--good)' : 'var(--pane-line)');
+        if (P) style(n, p, (1 - p) * -14, 0);
+        else {
+          n.style.opacity = p;
+          n.style.transform = `translate(-50%, calc(-50% + ${(1 - p) * 14}px))`;
+        }
       });
+      if (P) {
+        css(gitNode, 'color', lit ? 'var(--good)' : 'var(--ink-2)');
+        css(rmNode, 'color', lit ? 'var(--accent)' : 'var(--ink-2)');
+      } else {
+        css(gitNode, 'border-color', lit ? 'var(--good)' : 'var(--pane-line)');
+        css(rmNode, 'border-color', lit ? 'var(--accent)' : 'var(--pane-line)');
+      }
       vParts.forEach((v, i) => {
         const p = prog(lt, 5.0 + i * 1.3, 0.7, ease.outExpo);
         style(v, p, 0, (1 - p) * 24);
@@ -1540,29 +1669,48 @@ function permScene(ctx, start) {
 
 // ---------------------------------------------------------------- 11. nothing hidden
 
+const STATUS = { left: '⠋ [BUILD]', cwd: '~/code/api:main', model: 'deepseek/deepseek-flash' };
+
 function detailScene(ctx, start) {
   const node = scene(ctx.stage);
-  const h1 = words(node, 'h1', 'Nothing hidden.', 96, 124, 1500);
-  const lead = words(node, 'lead', 'Token count, cost and model always sit in the status bar. Native Rust, 60 FPS, no JavaScript runtime.', 100, 208, 1720);
-  lead.node.style.fontSize = '32px';
+  const h1 = title(node, 'Nothing hidden.', 1500);
+  const lead = sub(node, 'Token count, cost and model always sit in the status bar. Native Rust, 60 FPS, no JavaScript runtime.', h1, 208, 1720);
 
-  const bar = place(el('div', 'tui', node), 96, 360, 1728, 0);
-  bar.style.height = 'auto';
-  bar.innerHTML = `<pre style="font-size:30px;line-height:1.6;padding:22px 32px;overflow:hidden"><span class="co">${'─'.repeat(120)}</span>
+  // the status line as maki lays it out at this terminal width, narrow ones truncating from the front
+  const cols = L(92, 60);
+  const tokText = '22.1k/200.0k (11%)';
+  const costText = '$0.019';
+  const right = statusRight(cols, STATUS.left, STATUS.cwd, STATUS.model, `  ${tokText} ${costText} `);
+  const [cwdShown, modelShown] = right.slice(0, -(tokText.length + costText.length + 4)).split('  ');
+  const gap = ' '.repeat(cols - STATUS.left.length - right.length);
+  const [BX, BY, BW] = L([96, 360, 1728], [40, 580, 1000]);
+  const bar = place(el('div', 'tui', node), BX, BY, BW);
+  bar.innerHTML = `<pre style="font-size:${L(30, 26.6)}px;line-height:1.6;padding:22px 32px;overflow:hidden"><span class="co">${'─'.repeat(cols)}</span>
 <span class="co">❯</span> <span class="co">Queue another prompt...</span>
-<span class="co">${'─'.repeat(120)}</span>
-<span class="ye">⠋</span> <span class="cy" style="font-weight:700">[BUILD]</span>   <span class="co">~/code/api:main</span>  <span data-k="model" class="co">deepseek/deepseek-flash</span>  <span data-k="tok">22.1k/200.0k (11%)</span> <span data-k="cost">$0.019</span></pre>`;
+<span class="co">${'─'.repeat(cols)}</span>
+<span class="ye">⠋</span> <span class="cy" style="font-weight:700">[BUILD]</span>${gap}<span class="co">${esc(cwdShown)}</span>  <span data-k="model" class="co">${esc(modelShown)}</span>  <span data-k="tok">${tokText}</span> <span data-k="cost">${costText}</span></pre>`;
   const tok = bar.querySelector('[data-k="tok"]');
   const cost = bar.querySelector('[data-k="cost"]');
   const model = bar.querySelector('[data-k="model"]');
-  const callouts = [['context used', tok], ['what it cost', cost], ['which model', model]].map(([label]) => {
+
+  // wide: arrows under the fields. tall: the same fields pulled out full size
+  const callouts = P ? [] : [['context used', tok], ['what it cost', cost], ['which model', model]].map(([label]) => {
     const c = el('div', 'abs mono acc', node, '↑ ' + label);
     c.style.fontSize = '24px';
     return c;
   });
+  const fields = P ? place(el('div', 'abs', node), M, 880, CW) : null;
+  const fieldVals = [];
+  if (fields) {
+    Object.assign(fields.style, { display: 'grid', gap: '22px' });
+    for (const [label, value] of [['context used', tokText], ['what it cost', costText], ['which model', STATUS.model]]) {
+      const f = el('div', '', fields, `<div class="mono acc" style="font-size:28px">${label}</div><div class="mono" style="font-size:46px">${value}</div>`);
+      fieldVals.push(f);
+    }
+  }
 
-  const also = place(el('div', 'abs', node), 96, 780, 1728);
-  also.innerHTML = '<div class="mono dim" style="font-size:22px;margin-bottom:16px">also in there</div>';
+  const also = place(el('div', 'abs', node), L(96, M), L(780, 1350), L(1728, CW));
+  also.innerHTML = `<div class="mono dim" style="font-size:${L(22, 28)}px;margin-bottom:16px">also in there</div>`;
   const alsoLabel = also.firstChild;
   const list = el('div', '', also);
   Object.assign(list.style, { display: 'flex', flexWrap: 'wrap', gap: '14px' });
@@ -1577,14 +1725,21 @@ function detailScene(ctx, start) {
       const bIn = prog(lt, 1.2, 0.7, ease.outExpo);
       style(bar, bIn, 0, (1 - bIn) * 30);
       const grow = clamp((lt - 1.6) / 4);
-      text(tok, `${(22.1 + grow * 9.3).toFixed(1)}k/200.0k (${Math.round(11 + grow * 5)}%)`);
-      text(cost, `$${(0.019 + grow * 0.008).toFixed(3)}`);
+      const tokNow = `${(22.1 + grow * 9.3).toFixed(1)}k/200.0k (${Math.round(11 + grow * 5)}%)`;
+      const costNow = `$${(0.019 + grow * 0.008).toFixed(3)}`;
+      text(tok, tokNow);
+      text(cost, costNow);
       callouts.forEach((c, i) => {
         const target = [tok, cost, model][i];
         const p = prog(lt, 2.0 + i * 0.4, 0.5, ease.outExpo);
-        c.style.left = 96 + target.offsetLeft + 'px';
-        c.style.top = 360 + bar.offsetHeight + 12 + 'px';
+        c.style.left = BX + target.offsetLeft + 'px';
+        c.style.top = BY + bar.offsetHeight + 12 + 'px';
         style(c, p, 0, (1 - p) * 16);
+      });
+      fieldVals.forEach((f, i) => {
+        const p = prog(lt, 2.0 + i * 0.4, 0.5, ease.outExpo);
+        style(f, p, 0, (1 - p) * 16);
+        if (i < 2) text(f.lastChild, i ? costNow : tokNow);
       });
       style(alsoLabel, prog(lt, 4.2, 0.4));
       items.forEach((it, i) => {
@@ -1601,21 +1756,19 @@ const PROVIDERS = ['Anthropic', 'OpenAI', 'xAI', 'Google', 'Copilot', 'Ollama', 
 
 function providerScene(ctx, start) {
   const node = scene(ctx.stage);
-  const h1 = words(node, 'h1', 'Bring your own model. Local ones too.', 96, 124, 1500);
-  const lead = words(node, 'lead', 'Set an API key env var, or <code>maki auth login openai</code> for OAuth.', 100, 208, 1500);
-  lead.node.style.fontSize = '32px';
-  const wrap = place(el('div', 'abs', node), 96, 330, 1728);
+  const h1 = title(node, 'Bring your own model. Local ones too.', 1500);
+  const lead = sub(node, 'Set an API key env var, or <code>maki auth login openai</code> for OAuth.', h1, 208);
+  const wrap = place(el('div', 'abs', node), L(96, M), L(330, 560), L(1728, CW));
   Object.assign(wrap.style, { display: 'flex', flexWrap: 'wrap', gap: '18px' });
   const chips = PROVIDERS.map(p => {
     const c = el('span', 'chip', wrap, p);
-    c.style.fontSize = '32px';
-    c.style.padding = '10px 26px';
+    Object.assign(c.style, { fontSize: L(32, 36) + 'px', padding: '10px 26px' });
     if (p === 'Ollama' || p === 'llama.cpp') c.style.borderColor = 'var(--accent)';
     return c;
   });
-  const plus = place(el('div', 'abs', node), 96, 700, 1500);
-  plus.innerHTML = `<div class="say" style="font-size:38px">Anything that speaks the OpenAI or Anthropic API works too.</div>
-    <div class="lead" style="font-size:30px;margin-top:12px">Or drop an executable in <code>~/.config/maki/providers/</code> for a custom provider or proxy.</div>`;
+  const plus = place(el('div', 'abs', node), L(96, M), L(700, 1240), L(1500, CW));
+  plus.innerHTML = `<div class="say" style="font-size:${L(38, 46)}px">Anything that speaks the OpenAI or Anthropic API works too.</div>
+    <div class="lead" style="font-size:${L(30, 40)}px;margin-top:12px">Or drop an executable in <code>~/.config/maki/providers/</code> for a custom provider or proxy.</div>`;
   return {
     node,
     render(lt) {
@@ -1636,19 +1789,19 @@ function providerScene(ctx, start) {
 
 function outroScene(ctx, start) {
   const node = scene(ctx.stage);
-  const mark = words(node, '', '<span style="font-weight:800;font-size:170px;letter-spacing:-0.03em;line-height:1">maki</span>', 0, 250, W);
+  const mark = words(node, '', `<span style="font-weight:800;font-size:${L(170, 180)}px;letter-spacing:-0.03em;line-height:1">maki</span>`, 0, L(250, 560), W);
   mark.node.style.textAlign = 'center';
-  const tag = words(node, 'lead', 'the efficient coder', 0, 440, W);
+  const tag = words(node, 'lead', 'the efficient coder', 0, L(440, 760), W);
   Object.assign(tag.node.style, { textAlign: 'center', fontSize: '46px' });
-  const install = place(el('div', 'abs', node), 0, 560, W);
+  const install = place(el('div', 'abs', node), 0, L(560, 880), W);
   install.innerHTML = `<div style="display:flex;flex-direction:column;align-items:center;gap:22px">
-    <div class="mono" data-k="a" style="font-size:40px;padding:18px 34px;border-radius:10px;background:var(--pane-bg);color:#DDE0EA;box-shadow:var(--pane-shadow)"><span style="color:#F7A87D">$</span> curl -fsSL https://maki.sh/install.sh | sh</div>
-    <div class="mono" data-k="b" style="font-size:28px;color:var(--ink-2)"><span class="acc">$</span> nix run github:tontinton/maki</div>
-    <div data-k="c" style="font-size:30px;font-weight:700;margin-top:18px"><span class="acc">maki.sh</span> <span class="dim">·</span> github.com/tontinton/maki</div>
+    <div class="mono" data-k="a" style="font-size:${L(40, 30)}px;padding:${L('18px 34px', '18px 26px')};border-radius:10px;background:var(--pane-bg);color:#DDE0EA;box-shadow:var(--pane-shadow)"><span style="color:#F7A87D">$</span> curl -fsSL https://maki.sh/install.sh | sh</div>
+    <div class="mono" data-k="b" style="font-size:${L(28, 30)}px;color:var(--ink-2)"><span class="acc">$</span> nix run github:tontinton/maki</div>
+    <div data-k="c" style="font-size:${L(30, 34)}px;font-weight:700;margin-top:18px"><span class="acc">maki.sh</span> <span class="dim">·</span> github.com/tontinton/maki</div>
   </div>`;
   const parts = ['a', 'b', 'c'].map(k => install.querySelector(`[data-k="${k}"]`));
-  const hint = place(el('div', 'abs mono', node, '<kbd>g</kbd> to watch again · <kbd>j</kbd> <kbd>k</kbd> to jump between chapters'), 0, 880, W);
-  Object.assign(hint.style, { textAlign: 'center', fontSize: '22px', color: 'var(--ink-3)' });
+  const hint = place(el('div', 'abs mono', node, P ? 'tap to pause · drag the bar to scrub' : '<kbd>g</kbd> to watch again · <kbd>j</kbd> <kbd>k</kbd> to jump between chapters'), 0, L(880, 1260), W);
+  Object.assign(hint.style, { textAlign: 'center', fontSize: L(22, 28) + 'px', color: 'var(--ink-3)' });
   hint.querySelectorAll('kbd').forEach(k => (k.style.fontSize = '18px'));
   if (ctx.exporting) hint.remove();
   return {

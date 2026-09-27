@@ -5,8 +5,6 @@ import {
 } from './three.min.js';
 import { rgbOf } from './lib.js';
 
-const STAGE_W = 1920;
-const STAGE_H = 1080;
 export const MAX_TURNS = 40;
 export const SPACING = 1;
 const COL_W = 0.72;
@@ -48,8 +46,10 @@ const PALETTE = {
 };
 
 export class Staircase {
-  constructor(canvas, items) {
+  constructor(canvas, items, width, height) {
     this.items = items;
+    this.width = width;
+    this.height = height;
     this.renderer = new WebGLRenderer({ canvas, antialias: true, alpha: true, preserveDrawingBuffer: true });
     this.renderer.setClearColor(0x000000, 0);
     this.renderer.outputColorSpace = SRGBColorSpace;
@@ -137,9 +137,14 @@ export class Staircase {
     this.mesh.instanceColor.needsUpdate = true;
   }
 
+  dispose() {
+    this.renderer.dispose();
+    this.renderer.forceContextLoss();
+  }
+
   resize(pixelRatio) {
     this.renderer.setPixelRatio(pixelRatio);
-    this.renderer.setSize(STAGE_W, STAGE_H, false);
+    this.renderer.setSize(this.width, this.height, false);
   }
 
   // box: [x0, y0, z0, x1, y1, z1] in world units, region: [x, y, w, h] in stage px
@@ -167,9 +172,9 @@ export class Staircase {
     const sx = rx + rw / 2;
     const sy = ry + rh / 2;
     camera.left = -sx / zoom;
-    camera.right = (STAGE_W - sx) / zoom;
+    camera.right = (this.width - sx) / zoom;
     camera.top = sy / zoom;
-    camera.bottom = (sy - STAGE_H) / zoom;
+    camera.bottom = (sy - this.height) / zoom;
     camera.updateProjectionMatrix();
     camera.updateMatrixWorld();
 
@@ -221,6 +226,6 @@ export class Staircase {
 
   project(x, y, z) {
     const p = this.v.set(x, y, z).project(this.camera);
-    return [(p.x + 1) * 0.5 * STAGE_W, (1 - p.y) * 0.5 * STAGE_H];
+    return [(p.x + 1) * 0.5 * this.width, (1 - p.y) * 0.5 * this.height];
   }
 }

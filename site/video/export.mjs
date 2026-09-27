@@ -1,6 +1,6 @@
 // Renders the film to an MP4 by stepping its clock one frame at a time in headless Chromium.
 //
-//   node site/video/export.mjs [--fps 60] [--theme dark|light] [--workers 3] [--out maki.mp4] [--start s] [--end s]
+//   node site/video/export.mjs [--fps 60] [--theme dark|light] [--portrait] [--workers 3] [--out maki.mp4] [--start s] [--end s]
 //
 // Needs playwright (with its Chromium) and ffmpeg with libx264. Set FFMPEG to use a specific binary.
 
@@ -18,16 +18,16 @@ const MIME = {
   '.woff2': 'font/woff2', '.mp4': 'video/mp4', '.webp': 'image/webp', '.png': 'image/png',
   '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.cast': 'text/plain',
 };
-const WIDTH = 1920;
-const HEIGHT = 1080;
 
 const args = Object.fromEntries(
   process.argv.slice(2).join(' ').split('--').filter(Boolean).map(a => a.trim().split(/\s+/)),
 );
 const fps = Number(args.fps ?? 60);
 const theme = args.theme ?? 'dark';
+const portrait = 'portrait' in args;
+const viewport = portrait ? { width: 1080, height: 1920 } : { width: 1920, height: 1080 };
 const workers = Number(args.workers ?? 3);
-const out = resolve(args.out ?? `maki-${theme}.mp4`);
+const out = resolve(args.out ?? `maki-${theme}${portrait ? '-vertical' : ''}.mp4`);
 const ffmpeg = process.env.FFMPEG ?? 'ffmpeg';
 const { chromium } = createRequire(import.meta.url)('playwright');
 
@@ -43,12 +43,12 @@ const server = createServer(async (req, res) => {
   }
 });
 await new Promise(r => server.listen(0, '127.0.0.1', r));
-const url = `http://127.0.0.1:${server.address().port}/video/?export`;
+const url = `http://127.0.0.1:${server.address().port}/video/?export${portrait ? '&portrait' : ''}`;
 
 const browser = await chromium.launch({ args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--autoplay-policy=no-user-gesture-required'] });
 
 async function openFilm() {
-  const page = await browser.newPage({ viewport: { width: WIDTH, height: HEIGHT }, colorScheme: theme });
+  const page = await browser.newPage({ viewport, colorScheme: theme });
   page.on('pageerror', e => console.error('page error:', e.message));
   await page.goto(url);
   await page.waitForFunction(() => window.film);
@@ -61,7 +61,7 @@ await probe.close();
 const first = Math.floor(Number(args.start ?? 0) * fps);
 const frames = Math.ceil(Math.min(duration, Number(args.end ?? duration)) * fps) - first;
 const work = await mkdtemp(join(tmpdir(), 'maki-film-'));
-console.log(`${frames} frames at ${fps} fps, ${workers} workers, theme ${theme}`);
+console.log(`${frames} frames at ${fps} fps, ${workers} workers, theme ${theme}, ${viewport.width}x${viewport.height}`);
 
 let done = 0;
 const started = Date.now();

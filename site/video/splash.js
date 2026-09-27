@@ -1,11 +1,10 @@
-// A port of maki-ui/src/splash.rs, drawn onto a character grid the size of a
-// 96x27 terminal. Same wave layers, vignette, symbol ramp and fade timings.
+// A port of maki-ui/src/splash.rs, drawn onto a character grid: 96x27 for the
+// wide film, 60 columns for the tall one. Same wave layers, vignette, symbol
+// ramp and fade timings.
 
 import { clamp, ease } from './lib.js';
 
-export const COLS = 96;
-export const ROWS = 27;
-const MSG_ROWS = ROWS - 4;
+const CHROME_ROWS = 4;
 
 const BG = [0x28, 0x2a, 0x36];
 const FG = [0xf8, 0xf8, 0xf2];
@@ -38,14 +37,33 @@ const TIP_LABEL = '/btw';
 const TIP_DESC = 'to ask something without interrupting the session';
 const PLACEHOLDER_HEAD = 'Ask maki to ';
 const PLACEHOLDER_HINT = 'fix a bug';
-const STATUS_MODE = '[BUILD]';
-const STATUS_RIGHT = '~/code/wc:main  anthropic/claude-opus-5  0/200.0k (0%)';
+const STATUS_MODE = ' [BUILD]';
+const STATUS_CWD = '~/code/wc:main';
+const STATUS_MODEL = 'anthropic/claude-opus-5';
+const STATUS_CONTEXT = '0/200.0k (0%)';
+const CWD_MODEL_SEPARATOR = '  ';
+const TRUNCATE_PREFIX = '..';
+
+// status_bar.rs: on a narrow terminal the model gets up to half the free
+// columns and the cwd the rest, each losing its head behind `..`
+function truncateTail(s, max) {
+  if (s.length <= max) return s;
+  return TRUNCATE_PREFIX + s.slice(s.length - Math.max(0, max - TRUNCATE_PREFIX.length));
+}
+
+export function statusRight(cols, left, cwd, model, rest) {
+  const available = Math.max(0, cols - left.length - rest.length - CWD_MODEL_SEPARATOR.length);
+  const shortModel = truncateTail(model, Math.floor(available / 2));
+  return truncateTail(cwd, available - shortModel.length) + CWD_MODEL_SEPARATOR + shortModel + rest;
+}
 
 const mix = (a, b, t) => [0, 1, 2].map(i => Math.round(a[i] + (b[i] - a[i]) * t));
 const hex = c => `rgb(${c[0]},${c[1]},${c[2]})`;
 
 export class Terminal {
-  constructor(canvas) {
+  constructor(canvas, cols, rows) {
+    this.cols = cols;
+    this.rows = rows;
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d', { alpha: false });
     this.w = 0;
@@ -71,9 +89,9 @@ export class Terminal {
 
   // prompt: characters of `maki` typed at the shell, -1 once the app is up
   draw(splashT, typed) {
-    const { ctx, w, h } = this;
-    const cw = w / COLS;
-    const ch = h / ROWS;
+    const { ctx, w, h, cols, rows } = this;
+    const cw = w / cols;
+    const ch = h / rows;
     this.cw = cw;
     this.ch = ch;
     ctx.fillStyle = hex(BG);
@@ -88,7 +106,7 @@ export class Terminal {
     }
     const fade = splashT >= FADE_DURATION ? 1 : ease.out(clamp(splashT / FADE_DURATION));
     this.field(splashT + FIELD_OFFSET, fade);
-    const top = Math.floor((MSG_ROWS - 8) / 2);
+    const top = Math.floor((rows - CHROME_ROWS - 8) / 2);
     this.logo(splashT, fade, top);
     this.centered(TAGLINE, top + 1, mix(BG, FG, 0.75 * fade));
     const help = [
@@ -106,7 +124,7 @@ export class Terminal {
       [TIP_DESC, mix(BG, FG, MUTED_ALPHA * fade)],
     ];
     this.segments(tip, top + 5);
-    this.put(VERSION, COLS - VERSION.length - 1, 0, mix(BG, FG, VERSION_ALPHA * fade));
+    this.put(VERSION, cols - VERSION.length - 1, 0, mix(BG, FG, VERSION_ALPHA * fade));
     this.chrome(fade);
   }
 
@@ -121,17 +139,19 @@ export class Terminal {
   }
 
   chrome(fade) {
+    const { cols, rows } = this;
     const line = mix(BG, DIM, fade);
-    const rule = '─'.repeat(COLS);
-    this.put(rule, 0, ROWS - 4, line);
-    this.put(rule, 0, ROWS - 2, line);
-    let x = this.put('❯ ', 0, ROWS - 3, mix(BG, DIM, fade));
-    x = this.put(PLACEHOLDER_HEAD, x, ROWS - 3, mix(BG, DIM, fade));
+    const rule = '─'.repeat(cols);
+    this.put(rule, 0, rows - 4, line);
+    this.put(rule, 0, rows - 2, line);
+    let x = this.put('❯ ', 0, rows - 3, mix(BG, DIM, fade));
+    x = this.put(PLACEHOLDER_HEAD, x, rows - 3, mix(BG, DIM, fade));
     this.ctx.font = `italic ${this.font}`;
-    x = this.put(PLACEHOLDER_HINT, x, ROWS - 3, mix(BG, DIM, fade), false, true);
-    this.put('...', x, ROWS - 3, mix(BG, DIM, fade));
-    this.put(' ' + STATUS_MODE, 0, ROWS - 1, mix(BG, ACCENT, fade), true);
-    this.put(STATUS_RIGHT, COLS - STATUS_RIGHT.length - 1, ROWS - 1, mix(BG, FG, 0.55 * fade));
+    x = this.put(PLACEHOLDER_HINT, x, rows - 3, mix(BG, DIM, fade), false, true);
+    this.put('...', x, rows - 3, mix(BG, DIM, fade));
+    this.put(STATUS_MODE, 0, rows - 1, mix(BG, ACCENT, fade), true);
+    const right = statusRight(cols, STATUS_MODE, STATUS_CWD, STATUS_MODEL, `  ${STATUS_CONTEXT} `);
+    this.put(right, cols - right.length, rows - 1, mix(BG, FG, 0.55 * fade));
   }
 
   cursor(x, y) {
@@ -153,25 +173,25 @@ export class Terminal {
   }
 
   centered(str, y, color) {
-    this.put(str, Math.floor((COLS - str.length) / 2), y, color);
+    this.put(str, Math.floor((this.cols - str.length) / 2), y, color);
   }
 
   segments(segs, y) {
     const total = segs.reduce((n, s) => n + s[0].length, 0);
-    let x = Math.floor((COLS - total) / 2);
+    let x = Math.floor((this.cols - total) / 2);
     for (const [str, color, bold] of segs) x = this.put(str, x, y, color, bold);
   }
 
   logo(t, fade, y) {
     const alpha = LOGO_ALPHA * ease.out(clamp((t - LOGO_DELAY) / LOGO_RAMP)) * fade;
     const lifted = [ACCENT[0], ACCENT[1], Math.min(255, ACCENT[2] + LOGO_BLUE_LIFT)];
-    this.put('maki', Math.floor((COLS - 4) / 2), y, mix(BG, lifted, alpha), true);
+    this.put('maki', Math.floor((this.cols - 4) / 2), y, mix(BG, lifted, alpha), true);
   }
 
   field(t, fade) {
     const { ctx, cw, ch, buckets } = this;
-    const w = COLS;
-    const h = MSG_ROWS;
+    const w = this.cols;
+    const h = this.rows - CHROME_ROWS;
     const layers = [];
     for (let i = 0; i < WAVE_LAYERS; i++) {
       layers.push([2 + i * 1.8, 1.5 + i * 1.2, t * (0.3 + i * 0.15) + i * 2.094, 1 / (1.5 + i * 0.5)]);
