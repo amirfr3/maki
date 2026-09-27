@@ -38,6 +38,8 @@ cp apple-touch-icon.png "$OUT/"
 cp android-chrome-192x192.png "$OUT/"
 cp android-chrome-512x512.png "$OUT/"
 cp site.webmanifest "$OUT/"
+mkdir -p "$OUT/video"
+cp video/index.html video/film.js video/scenes.js video/lib.js video/splash.js video/world.js video/three.min.js "$OUT/video/"
 
 # 2. Build Zola docs
 cd docs
