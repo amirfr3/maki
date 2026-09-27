@@ -1323,7 +1323,7 @@ function luaScene(ctx, start) {
   });
 
   const h1c = words(node, 'h1', 'Give the model a new tool in 15 lines.', 96, 124, 1500);
-  const leadc = words(node, 'lead', 'Drop a file in <code>~/.config/maki/</code>, <code>/reload</code>, and the model can call it.', 100, 208, 1500);
+  const leadc = words(node, 'lead', 'Save it in <code>~/.config/maki/lua/</code>, <code>require</code> it from <code>init.lua</code>, <code>/reload</code>. The model can call it.', 100, 208, 1720);
   leadc.node.style.fontSize = '32px';
   const code = pane(node, 96, 300, 1010, PANE_HEAD + PRE_PAD * 2 + CI_TOOL.length * CODE_LH, 'lua/ci_status.lua', 'Luau');
   code.pre.style.lineHeight = CODE_LH + 'px';
@@ -1466,9 +1466,9 @@ function permScene(ctx, start) {
     ['&&', 860, 660],
     ['command', 1200, 660],
     ['command_name: git', 400, 760],
-    ['word: diff', 640, 760],
+    ['argument: diff', 660, 760],
     ['command_name: rm', 1080, 760],
-    ['word: -rf /', 1320, 760],
+    ['arguments: -rf /', 1360, 760],
   ];
   const E = [[0, 1], [1, 2], [1, 3], [1, 4], [2, 5], [2, 6], [4, 7], [4, 8]];
   let svg = `<svg width="${W}" height="${H}" style="position:absolute;inset:0;overflow:visible">`;
