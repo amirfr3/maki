@@ -6902,11 +6902,7 @@ fn tool_use_msg(id: &str) -> Message {
 fn tool_result_msg(id: &str, text: &str) -> Message {
     Message {
         role: Role::User,
-        content: vec![ContentBlock::ToolResult {
-            tool_use_id: id.into(),
-            content: text.into(),
-            is_error: false,
-        }],
+        content: vec![ContentBlock::tool_result(id, text, false)],
         display_text: Some(String::new()),
         ..Default::default()
     }
