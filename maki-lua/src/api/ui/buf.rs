@@ -493,9 +493,12 @@ fn inline_to_lua(lua: &Lua, inline: &InlineStyle) -> LuaResult<Table> {
 
 /// Plugins speak the same `#rrggbb | index | name | default` grammar as
 /// themes, so both directions go through [`SegmentColor`] and cannot drift.
-/// The orphan rule rules out `From`, both types are foreign here.
+/// A `[palette]` name of the running theme resolves here too, so a plugin
+/// can paint in the theme's own colors by name. The orphan rule rules out
+/// `From`, both types are foreign here.
 fn parse_span_color(s: &str) -> Option<SpanColor> {
-    Some(match SegmentColor::parse(s)? {
+    let resolved = maki_highlight::resolve_palette_color(s)?;
+    Some(match resolved {
         SegmentColor::Rgb(rgb) => SpanColor::Rgb(rgb),
         SegmentColor::Ansi(i) => SpanColor::Ansi(i),
         SegmentColor::Default => SpanColor::Default(DefaultColor::Default),

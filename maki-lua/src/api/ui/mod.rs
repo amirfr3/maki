@@ -398,6 +398,98 @@ fn set_window_title(
     Ok(())
 }
 
+/// Overrides the foreground color of a named theme style at runtime, or
+/// restores the theme's own color when the {color} is nil. The change is
+/// live: the next frame repaints with it, and it survives theme switches,
+/// because it patches whatever theme is running rather than replacing it.
+///
+/// Valid names are the ones `maki.ui.theme_style` accepts ("dim",
+/// "input_border", "accent", ...), plus the three mode colors
+/// "mode_build", "mode_plan", and "mode_bash" that paint the input box
+/// border. Only the foreground changes; modifiers and backgrounds stay.
+///
+/// @param name string Style name, e.g. "input_border" or "mode_build".
+/// @param color string|nil `#rrggbb`, an ANSI palette index like "4", or nil to restore the theme color.
+/// @return (boolean|nil, string|nil) true when applied, or nil and an error for an unknown name or a missing UI.
+/// @example
+/// maki.ui.set_theme_color("mode_build", "#1e6bb8")
+/// -- and back to the theme's own color:
+/// maki.ui.set_theme_color("mode_build")
+#[lua_fn]
+fn set_theme_color(
+    _lua: &Lua,
+    #[ctx] tx: Option<flume::Sender<UiAction>>,
+    name: String,
+    color: Option<String>,
+) -> LuaResult<(Option<bool>, Option<String>)> {
+    if let Some(color) = &color {
+        // Fail here, before the action: an unresolvable color must not reach
+        // the event loop, where `None` means "restore the theme color".
+        if maki_highlight::resolve_palette_color(color).is_none() {
+            return Ok((
+                None,
+                Some(format!(
+                    "not a color: '{color}' (expected #rrggbb, an ANSI index, a palette name, or 'default')"
+                )),
+            ));
+        }
+    }
+    let Some(tx) = tx else {
+        return Ok((None, Some("no interactive UI attached".to_owned())));
+    };
+    if ui_send(Some(&tx), UiAction::SetThemeColor { name, color }).is_err() {
+        return Ok((None, Some("UI is shutting down".to_owned())));
+    }
+    Ok((Some(true), None))
+}
+
+/// Reads the foreground color a named theme style paints with, after every
+/// `maki.ui.set_theme_color` override. The names are the ones
+/// `maki.ui.theme_style` accepts, plus "mode_build", "mode_plan", and
+/// "mode_bash".
+///
+/// @param name string Style name, e.g. "input_border".
+/// @return (string|nil, string|nil) The color as `maki.ui.theme_color` spells it, or nil and an error for an unknown name.
+/// @example
+/// local c = maki.ui.get_theme_color("mode_build")
+/// if c then
+///   buf:line({ { "border color", { fg = c } } })
+/// end
+#[lua_fn]
+fn get_theme_color(_lua: &Lua, name: String) -> LuaResult<(Option<String>, Option<String>)> {
+    if let Some(style) = maki_highlight::ui_style(&name) {
+        return Ok((style.fg.map(segment_color_to_lua), None));
+    }
+    if matches!(name.as_str(), "mode_build" | "mode_plan" | "mode_bash") {
+        if let Some(c) = maki_highlight::override_color(&name) {
+            return Ok((Some(segment_color_to_lua(c)), None));
+        }
+        return Ok((Some("default".to_owned()), None));
+    }
+    Ok((None, Some(format!("unknown style: {name}"))))
+}
+
+/// Reads the running theme's `[palette]`: color name to `#rrggbb`, e.g.
+/// `{ blue = "#7aa2f7", comment = "#565f89" }`. The map matches what
+/// `maki.ui.set_theme_color` and span colors resolve names against, so a
+/// picker built from it always offers the colors the active theme actually
+/// paints with. Empty when the running theme has no `[palette]`.
+///
+/// @return (table) Map of palette name to `#rrggbb` hex string.
+/// @example
+/// local pal = maki.ui.get_theme_palette()
+/// for name, hex in pairs(pal) do
+///   print(name .. " = " .. hex)
+/// end
+#[lua_fn]
+fn get_theme_palette(lua: &Lua) -> LuaResult<Table> {
+    let tbl = lua.create_table()?;
+    for (name, hex) in maki_highlight::theme_palette() {
+        tbl.raw_set(name, hex)?;
+    }
+    Ok(tbl)
+}
+
 /// Runs a built-in UI action by name, exactly as its default keybinding
 /// would. Handy when a default key never reaches maki because tmux or
 /// your terminal grabs it first: bind a new key with `maki.keymap.set`
@@ -756,11 +848,12 @@ lua_table! {
     /// - `open_editor` returns -1.
     /// - `flash` writes to the log.
     /// - `open_win`, `set_status_hint`, and `set_window_title` have no effect.
+    /// - `set_theme_color` returns `nil, "no interactive UI attached"`.
     extend "maki.ui" => pub(crate) fn add_ui_fns(), DOCS [
-        buf, theme_color, theme_style, highlight, markdown, humantime, terminal_size,
+        buf, theme_color, theme_style, get_theme_color, get_theme_palette, highlight, markdown, humantime, terminal_size,
         display_width, truncate_text,
         manual flash, manual action, manual open_editor, manual open_win, manual set_status_hint,
-        manual set_window_title, manual input, manual input_edit,
+        manual set_window_title, manual set_theme_color, manual input, manual input_edit,
     ]
 }
 
@@ -774,6 +867,7 @@ pub(crate) fn create_ui_table(
 
     flash__register(&t, lua, ui_action_tx.clone(), Arc::clone(&plugin))?;
     set_window_title__register(&t, lua, ui_action_tx.clone())?;
+    set_theme_color__register(&t, lua, ui_action_tx.clone())?;
     action__register(&t, lua, ui_action_tx.clone())?;
     open_editor__register(&t, lua, ui_action_tx.clone())?;
     input__register(&t, lua, ui_action_tx.clone())?;

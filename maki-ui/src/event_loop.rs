@@ -972,6 +972,18 @@ impl<'t> EventLoop<'t> {
                     warn!(%error, "failed to set window title");
                 }
             }
+            UiAction::SetThemeColor { name, color } => {
+                let parsed = color.as_deref().and_then(maki_highlight::resolve_palette_color);
+                if !maki_highlight::set_style_override(
+                    &name,
+                    parsed,
+                    theme::STYLE_NAMES,
+                ) {
+                    warn!(style = %name, "set_theme_color: unknown style");
+                } else {
+                    theme::patch_running_theme();
+                }
+            }
             UiAction::OpenEditor { path, reply_tx } => {
                 let code = self.open_editor(self.focused, &path);
                 let _ = reply_tx.send(code);

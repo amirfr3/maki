@@ -1,6 +1,8 @@
 use crate::theme;
 
-use maki_highlight::StyledSegment;
+use std::collections::HashMap;
+
+use maki_highlight::{StyledSegment, UiStyle};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
 
@@ -19,12 +21,28 @@ pub(crate) fn is_ready() -> bool {
 pub(crate) fn refresh_syntax_theme() {
     let theme = theme::current();
     maki_highlight::set_theme(theme.syntax.clone());
-    maki_highlight::set_ui_styles(
-        theme::STYLE_NAMES
-            .iter()
-            .map(|name| ((*name).to_owned(), ui_style(theme::style_by_name(name))))
-            .collect(),
-    );
+    let mut styles: HashMap<String, UiStyle> = theme::STYLE_NAMES
+        .iter()
+        .map(|name| ((*name).to_owned(), ui_style(theme::style_by_name(name))))
+        .collect();
+    // The mode colors are not `Style` fields, so they would never reach
+    // `maki.ui.theme_style` / `get_theme_color`. Publish them as plain
+    // foregrounds, with the live override already applied.
+    for (name, color) in [
+        ("mode_build", theme.mode_build),
+        ("mode_plan", theme.mode_plan),
+        ("mode_bash", theme.mode_bash),
+    ] {
+        styles.insert(
+            name.to_owned(),
+            UiStyle {
+                fg: Some(theme::segment_color(color)),
+                ..Default::default()
+            },
+        );
+    }
+    maki_highlight::set_ui_styles(styles);
+    maki_highlight::set_theme_palette(theme.palette.clone());
 }
 
 fn ui_style(style: Style) -> maki_highlight::UiStyle {

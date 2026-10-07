@@ -260,12 +260,116 @@ pub fn set_ui_styles(styles: HashMap<String, UiStyle>) {
 }
 
 pub fn ui_style(name: &str) -> Option<UiStyle> {
-    ui_styles_lock()
+    let mut style = ui_styles_lock()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(name)
+        .cloned()?;
+    if let Some(fg) = override_color(name) {
+        style.fg = Some(fg);
+    }
+    Some(style)
+}
+
+/// Runtime foreground overrides for published UI styles and the mode colors,
+/// keyed by style name ("input_border", "mode_build", ...). Shared by
+/// `maki-ui` (for its own `Style` reads) and `maki-lua` (for
+/// `maki.ui.set_theme_color`), which is why it lives here and not in the UI
+/// crate. Stored as `SegmentColor` so both spellings convert once, at the
+/// edges.
+static COLOR_OVERRIDES: OnceLock<RwLock<HashMap<String, SegmentColor>>> = OnceLock::new();
+
+fn color_overrides_lock() -> &'static RwLock<HashMap<String, SegmentColor>> {
+    COLOR_OVERRIDES.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// Set or clear a runtime foreground override. {color} `None` restores the
+/// published style. Returns false for a name no caller ever published, so
+/// typos fail loudly instead of silently painting nothing.
+pub fn set_style_override(name: &str, color: Option<SegmentColor>, known: &[&str]) -> bool {
+    if !known.contains(&name)
+        && !matches!(name, "mode_build" | "mode_plan" | "mode_bash")
+    {
+        return false;
+    }
+    let mut map = color_overrides_lock()
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    match color {
+        Some(c) => {
+            map.insert(name.to_owned(), c);
+        }
+        None => {
+            map.remove(name);
+        }
+    }
+    true
+}
+
+/// The override for {name}, if a plugin set one.
+pub fn override_color(name: &str) -> Option<SegmentColor> {
+    color_overrides_lock()
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .get(name)
         .cloned()
 }
+
+/// Every active override, `{ name: color }`.
+pub fn color_overrides() -> HashMap<String, SegmentColor> {
+    color_overrides_lock()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// Overwrite one entry of the published style map, leaving the rest alone.
+/// The UI theme patcher uses this for styles its struct does not hold as
+/// fields.
+pub fn set_named_style(name: &str, style: UiStyle) {
+    ui_styles_lock()
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(name.to_owned(), style);
+}
+
+/// The running theme's `[palette]`, color name to `#rrggbb`. Published by
+/// the UI whenever it installs a theme, so palette-name resolution always
+/// matches what is on screen.
+static THEME_PALETTE: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new();
+
+fn theme_palette_lock() -> &'static RwLock<HashMap<String, String>> {
+    THEME_PALETTE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+pub fn set_theme_palette(palette: HashMap<String, String>) {
+    *theme_palette_lock()
+        .write()
+        .unwrap_or_else(|e| e.into_inner()) = palette;
+}
+
+/// Resolve {s} to a color the way the running theme would: a `[palette]`
+/// name first, then a literal.
+pub fn resolve_palette_color(s: &str) -> Option<SegmentColor> {
+let palette = theme_palette_lock()
+.read()
+.unwrap_or_else(|e| e.into_inner());
+if let Some(c) = palette.get(s).and_then(|hex| SegmentColor::parse(hex)) {
+return Some(c);
+}
+SegmentColor::parse(s)
+}
+
+/// The running theme's `[palette]`, name to `#rrggbb`. Empty when no theme
+/// with a palette is installed.
+pub fn theme_palette() -> HashMap<String, String> {
+theme_palette_lock()
+.read()
+.unwrap_or_else(|e| e.into_inner())
+.clone()
+}
+
+/// Colors the syntax theme names itself. UI styles live in [`ui_style`].
 
 /// Colors the syntax theme names itself. UI styles live in [`ui_style`].
 pub fn theme_color(name: &str) -> Option<SegmentColor> {

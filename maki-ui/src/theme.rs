@@ -282,9 +282,74 @@ pub fn current() -> Guard<Arc<Theme>> {
 pub fn set(theme: Theme) {
     // Order matters: install colors before bumping the counter, otherwise a
     // reader could see the new generation but bake with the old palette.
+    let mut theme = theme;
+    reapply_overrides(&mut theme);
     THEME.store(Arc::new(theme));
     crate::highlight::refresh_syntax_theme();
     GENERATION.fetch_add(1, Ordering::Release);
+}
+
+/// Runtime foreground overrides for named styles, keyed by style name
+/// ("input_border", "mode_build", ...). Set by plugins through
+/// `maki.ui.set_theme_color`; the running `Theme` instance itself is
+/// patched, so every reader sees them with no call-site wrappers, and
+/// [`set`] re-applies them so a theme switch keeps them. The map lives in
+/// `maki-highlight` so `maki-lua` reaches it without depending on this
+/// crate.
+fn reapply_overrides(theme: &mut Theme) {
+    for (name, color) in maki_highlight::color_overrides() {
+        apply_override(theme, &name, color);
+    }
+}
+
+/// Rebuild the running `Theme` instance with every override applied. Called
+/// on the UI thread after a plugin changes one through
+/// `maki.ui.set_theme_color`, so the next frame paints with it.
+pub(crate) fn patch_running_theme() {
+    let owned = Arc::try_unwrap(THEME.load_full()).ok()
+        .or_else(|| load_by_name(&current_theme_name()).ok());
+    let Some(mut theme) = owned else {
+        return;
+    };
+    reapply_overrides(&mut theme);
+    THEME.store(Arc::new(theme));
+    crate::highlight::refresh_syntax_theme();
+    GENERATION.fetch_add(1, Ordering::Release);
+}
+
+fn apply_override(theme: &mut Theme, name: &str, color: SegmentColor) {
+    let c = to_color(color);
+    let field: Option<&mut Style> = match name {
+        "input_border" => Some(&mut theme.input_border),
+        "accent" => Some(&mut theme.accent),
+        "dim" | "tool_dim" => Some(&mut theme.tool_dim),
+        "mode_build" => {
+            theme.mode_build = c;
+            return;
+        }
+        "mode_plan" => {
+            theme.mode_plan = c;
+            return;
+        }
+        "mode_bash" => {
+            theme.mode_bash = c;
+            return;
+        }
+        _ => None,
+    };
+    match field {
+        Some(style) => {
+            style.fg = Some(c);
+        }
+        None => {
+            // A style the struct holds by name only, read through
+            // style_by_name: stored in the published ui-styles map.
+            if let Some(mut ui) = maki_highlight::ui_style(name) {
+                ui.fg = Some(color);
+                maki_highlight::set_named_style(name, ui);
+            }
+        }
+    }
 }
 
 /// Tracks terminal focus so the input caret can recolor itself when the user
@@ -528,6 +593,10 @@ pub struct Theme {
     pub shell_prefix: Style,
     pub progress_bar: Style,
 
+    /// The theme's `[palette]`, name to `#rrggbb`, published to
+    /// `maki-highlight` so plugins can resolve palette names against the
+    /// running theme.
+    pub palette: HashMap<String, String>,
     pub syntax: syntect::highlighting::Theme,
 }
 
@@ -995,6 +1064,7 @@ impl Theme {
                 }
             },
             syntax,
+            palette: raw_palette,
         })
     }
 
