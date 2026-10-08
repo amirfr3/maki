@@ -494,9 +494,12 @@ fn inline_to_lua(lua: &Lua, inline: &InlineStyle) -> LuaResult<Table> {
 
 /// Plugins speak the same `#rrggbb | index | name | default` grammar as
 /// themes, so both directions go through [`SegmentColor`] and cannot drift.
-/// The orphan rule rules out `From`, both types are foreign here.
+/// A `[palette]` name of the running theme resolves here too, so a plugin
+/// can paint in the theme's own colors by name. The orphan rule rules out
+/// `From`, both types are foreign here.
 fn parse_span_color(s: &str) -> Option<SpanColor> {
-    Some(match SegmentColor::parse(s)? {
+    let resolved = maki_color::Registry::resolve_color(s)?;
+    Some(match resolved {
         SegmentColor::Rgb(rgb) => SpanColor::Rgb(rgb),
         SegmentColor::Ansi(i) => SpanColor::Ansi(i),
         SegmentColor::Default => SpanColor::Default(DefaultColor::Default),
@@ -1083,6 +1086,32 @@ mod palette_roundtrip {
     #[test_case("256"; "index out of range")]
     fn rejected_color_spellings(name: &str) {
         assert_eq!(parse_span_color(name), None);
+    }
+
+    /// A theme that names its colors lets a plugin paint in them by name:
+    /// "blue" resolves to the palette entry while it is installed, and
+    /// falls back to the ANSI name once the palette is empty again.
+    #[test]
+    fn span_colors_resolve_theme_palette_names() {
+        let _registry = maki_color::exclusive();
+        const PALETTE_BLUE: &str = "#7aa2f7";
+        const BLUE: &str = "blue";
+
+        maki_color::Registry::set_palette(std::collections::HashMap::from([(
+            BLUE.to_owned(),
+            PALETTE_BLUE.to_owned(),
+        )]));
+        assert_eq!(
+            parse_span_color(BLUE),
+            Some(SpanColor::Rgb((0x7a, 0xa2, 0xf7)))
+        );
+
+        maki_color::Registry::set_palette(std::collections::HashMap::new());
+        assert_eq!(
+            parse_span_color(BLUE),
+            Some(SpanColor::Ansi(4)),
+            "without a palette, blue is the ANSI name again"
+        );
     }
 
     #[test_case(SpanColor::Ansi(4); "palette index")]

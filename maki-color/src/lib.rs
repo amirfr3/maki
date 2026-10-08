@@ -6,11 +6,12 @@
 //! and the Lua API parses plugin strings into it. [`UiStyle`] is the style
 //! table a theme publishes for plugins.
 //!
-//! The [`Registry`] holds the named styles the UI installs whenever a theme
-//! takes over. It lives in this crate because both `maki-lua`
-//! (synchronous reads while a plugin paints) and `maki-ui` (the only
-//! writer) must reach it, and neither can depend on the other. Reads are
-//! cheap; the UI thread is the only writer.
+//! The [`Registry`] holds what the UI installs whenever a theme takes over:
+//! the named styles, the theme `[palette]`, and any runtime color overrides
+//! a plugin set through `maki.ui.set_theme_color`. It lives in this crate
+//! because both `maki-lua` (synchronous reads while a plugin paints) and
+//! `maki-ui` (the only writer) must reach it, and neither can depend on the
+//! other. Reads are cheap; the UI thread is the only writer.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -23,7 +24,7 @@ const HEX_RGB_LEN: usize = 6;
 type Rgb = (u8, u8, u8);
 
 /// A color exactly as a terminal can paint it. `Default` is "whatever the
-/// theme's own color is".
+/// theme's own color is", the same meaning an absent override carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SegmentColor {
     Rgb(Rgb),
@@ -104,6 +105,8 @@ pub struct UiStyle {
 #[derive(Default)]
 struct State {
     styles: HashMap<String, UiStyle>,
+    palette: HashMap<String, String>,
+    overrides: HashMap<String, SegmentColor>,
 }
 
 static STATE: OnceLock<Mutex<State>> = OnceLock::new();
@@ -126,24 +129,90 @@ pub fn exclusive() -> MutexGuard<'static, ()> {
     TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// The running theme's published styles. The UI thread is the only writer;
-/// `maki-lua` reads synchronously while a plugin paints.
+/// The running theme's published styles, `[palette]`, and runtime color
+/// overrides. The UI thread is the only writer; `maki-lua` reads
+/// synchronously while a plugin paints.
 pub struct Registry;
 
 impl Registry {
+    /// The three mode colors that paint the input box border. Not `Style`
+    /// fields on the UI's `Theme`, so the UI publishes them as styles
+    /// itself.
+    pub const MODE_STYLES: [&'static str; 3] = ["mode_build", "mode_plan", "mode_bash"];
+
     /// Replace every published style.
     pub fn set_styles(styles: HashMap<String, UiStyle>) {
         lock().styles = styles;
     }
 
-    /// The published style for {name}.
+    /// The published style for {name}, with any runtime override already
+    /// merged into its foreground.
     pub fn style(name: &str) -> Option<UiStyle> {
-        lock().styles.get(name).cloned()
+        let s = lock();
+        let mut style = s.styles.get(name)?.clone();
+        if let Some(fg) = s.overrides.get(name) {
+            style.fg = Some(*fg);
+        }
+        Some(style)
     }
 
-    /// Empty the registry. The state is process-global like the theme, so a
-    /// suite that shares one process needs a way to start a case from a
-    /// blank slate.
+    /// The runtime foreground override for {name}, if a plugin set one.
+    pub fn override_color(name: &str) -> Option<SegmentColor> {
+        lock().overrides.get(name).copied()
+    }
+
+    /// Every active override, `{ name: color }`.
+    pub fn color_overrides() -> HashMap<String, SegmentColor> {
+        lock().overrides.clone()
+    }
+
+    /// Set or clear a runtime foreground override. {color} `None` restores
+    /// the published color. {known} gates the name: a typo is refused
+    /// loudly instead of silently painting nothing. The mode styles are
+    /// always allowed.
+    pub fn set_override(name: &str, color: Option<SegmentColor>, known: &[&str]) -> bool {
+        if !known.contains(&name) && !Self::MODE_STYLES.contains(&name) {
+            return false;
+        }
+        let mut s = lock();
+        match color {
+            Some(c) => {
+                s.overrides.insert(name.to_owned(), c);
+            }
+            None => {
+                s.overrides.remove(name);
+            }
+        }
+        true
+    }
+
+    /// Replace the running theme's `[palette]`, color name to `#rrggbb`.
+    pub fn set_palette(palette: HashMap<String, String>) {
+        lock().palette = palette;
+    }
+
+    /// The running theme's `[palette]`. Empty when the theme has none.
+    pub fn palette() -> HashMap<String, String> {
+        lock().palette.clone()
+    }
+
+    /// Resolve {s} the way the running theme would: a `[palette]` name
+    /// first, then a literal [`SegmentColor::parse`].
+    pub fn resolve_color(s: &str) -> Option<SegmentColor> {
+        let state = lock();
+        if let Some(c) = state
+            .palette
+            .get(s)
+            .and_then(|hex| SegmentColor::parse(hex))
+        {
+            return Some(c);
+        }
+        SegmentColor::parse(s)
+    }
+
+    /// Empty the whole registry. The state is process-global like the
+    /// theme, so a suite that shares one process needs a way to start a
+    /// case from a blank slate.
     pub fn reset() {
         *lock() = State::default();
     }
@@ -153,6 +222,8 @@ impl Registry {
 mod tests {
     use super::*;
 
+    const PALETTE_BLUE: &str = "#0a0b0c";
+    const LITERAL_WHITE: &str = "#ffffff";
     const BLUE: &str = "blue";
 
     #[test]
@@ -176,22 +247,87 @@ mod tests {
     }
 
     #[test]
-    fn styles_roundtrip_and_clear() {
+    fn override_roundtrip_and_clear() {
         let _registry = exclusive();
+        const KNOWN: &[&str] = &["input_border"];
+        const COLOR: SegmentColor = SegmentColor::Rgb((1, 2, 3));
+
+        Registry::set_override("input_border", Some(COLOR), KNOWN);
+        assert_eq!(Registry::override_color("input_border"), Some(COLOR));
+
+        Registry::set_override("input_border", None, KNOWN);
+        assert_eq!(Registry::override_color("input_border"), None);
+    }
+
+    /// A typo must not read as "restore the theme color" downstream, so an
+    /// unpublished name is refused before anything is painted.
+    #[test]
+    fn override_rejects_unknown_style_names() {
+        let _registry = exclusive();
+        assert!(!Registry::set_override(
+            "input_borders",
+            Some(SegmentColor::Default),
+            &["input_border"]
+        ));
+        assert_eq!(Registry::override_color("input_borders"), None);
+    }
+
+    #[test]
+    fn mode_colors_are_overridable_without_a_published_style() {
+        let _registry = exclusive();
+        const MODE_STYLE: &str = "mode_build";
+
+        assert!(Registry::set_override(
+            MODE_STYLE,
+            Some(SegmentColor::Default),
+            &[]
+        ));
+        assert!(Registry::override_color(MODE_STYLE).is_some());
+        Registry::set_override(MODE_STYLE, None, &[]);
+    }
+
+    #[test]
+    fn palette_name_resolves_before_literal() {
+        let _registry = exclusive();
+        Registry::set_palette(HashMap::from([(BLUE.to_owned(), PALETTE_BLUE.to_owned())]));
+
+        assert_eq!(
+            Registry::resolve_color(BLUE),
+            SegmentColor::parse(PALETTE_BLUE)
+        );
+        assert_eq!(
+            Registry::resolve_color(LITERAL_WHITE),
+            SegmentColor::parse(LITERAL_WHITE),
+            "a literal still resolves when a palette is installed"
+        );
+
+        Registry::set_palette(HashMap::new());
+    }
+
+    /// The override has to be part of the style a plugin reads, or
+    /// `get_theme_color` and the border it paints drift apart.
+    #[test]
+    fn style_read_merges_the_override() {
+        let _registry = exclusive();
+        const NAME: &str = "input_border";
         Registry::set_styles(HashMap::from([(
-            "input_border".to_owned(),
+            NAME.to_owned(),
             UiStyle {
                 fg: Some(SegmentColor::Ansi(4)),
                 bold: true,
                 ..Default::default()
             },
         )]));
+        Registry::set_override(NAME, Some(SegmentColor::Rgb((9, 9, 9))), &[NAME]);
 
-        let style = Registry::style("input_border").unwrap();
-        assert_eq!(style.fg, Some(SegmentColor::Ansi(4)));
-        assert!(style.bold);
+        let style = Registry::style(NAME).unwrap();
+        assert_eq!(style.fg, Some(SegmentColor::Rgb((9, 9, 9))));
+        assert!(style.bold, "only the foreground changes");
 
-        Registry::reset();
-        assert_eq!(Registry::style("input_border"), None);
+        Registry::set_override(NAME, None, &[NAME]);
+        assert_eq!(
+            Registry::style(NAME).unwrap().fg,
+            Some(SegmentColor::Ansi(4))
+        );
     }
 }
