@@ -19,7 +19,7 @@ pub(crate) fn is_ready() -> bool {
 pub(crate) fn refresh_syntax_theme() {
     let theme = theme::current();
     maki_highlight::set_theme(theme.syntax.clone());
-    maki_highlight::set_ui_styles(
+    maki_color::Registry::set_styles(
         theme::STYLE_NAMES
             .iter()
             .map(|name| ((*name).to_owned(), ui_style(theme::style_by_name(name))))

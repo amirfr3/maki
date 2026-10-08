@@ -275,7 +275,7 @@ fn theme_color(lua: &Lua, name: String) -> LuaResult<mlua::Value> {
 /// buf:line({ { "note", { fg = dim.fg, bg = sel.bg } } })
 #[lua_fn]
 fn theme_style(lua: &Lua, name: String) -> LuaResult<mlua::Value> {
-    let Some(style) = maki_highlight::ui_style(&name) else {
+    let Some(style) = maki_color::Registry::style(&name) else {
         return Ok(mlua::Value::Nil);
     };
     let tbl = lua.create_table_with_capacity(0, UI_STYLE_FIELDS)?;

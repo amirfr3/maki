@@ -587,7 +587,7 @@ fn parse_syn_color(s: &str, palette: &HashMap<String, String>) -> Option<SynColo
     } else {
         palette.get(s).map(String::as_str).unwrap_or(s)
     };
-    SegmentColor::parse(resolved).map(SegmentColor::to_syntect)
+    SegmentColor::parse(resolved).map(maki_highlight::segment_to_syntect)
 }
 
 /// The highlighter speaks [`SegmentColor`], ratatui speaks [`Color`]. Anything
@@ -1110,7 +1110,7 @@ mod tests {
         assert_eq!(t.user.fg, Some(Color::Cyan));
         assert_eq!(
             t.syntax.settings.background,
-            Some(SegmentColor::Default.to_syntect())
+            Some(maki_highlight::segment_to_syntect(SegmentColor::Default))
         );
     }
 
@@ -1491,7 +1491,7 @@ diff_new_line_nr = { fg = "red" }
 
         for name in STYLE_NAMES {
             let style = style_by_name(name);
-            let published = maki_highlight::ui_style(name)
+            let published = maki_color::Registry::style(name)
                 .unwrap_or_else(|| panic!("{name} must be published"));
             let has = |m: Modifier| style.add_modifier.contains(m);
             assert_eq!(published.fg, style.fg.map(segment_color), "{name} fg");
@@ -1516,7 +1516,7 @@ diff_new_line_nr = { fg = "red" }
         set(tokyonight());
 
         let published =
-            maki_highlight::ui_style(name).unwrap_or_else(|| panic!("{name} must be published"));
+            maki_color::Registry::style(name).unwrap_or_else(|| panic!("{name} must be published"));
         assert!(
             slot(&published).is_some(),
             "{name} must be styled by the theme"
@@ -1575,7 +1575,7 @@ magenta    = "magenta"
             .foreground
             .expect("foreground must resolve");
         assert_eq!(
-            SegmentColor::from_syntect(fg),
+            maki_highlight::segment_from_syntect(fg),
             SegmentColor::Ansi(15),
             "white is palette 15"
         );
@@ -1586,7 +1586,7 @@ magenta    = "magenta"
             .background
             .expect("background must resolve");
         assert_eq!(
-            SegmentColor::from_syntect(bg),
+            maki_highlight::segment_from_syntect(bg),
             SegmentColor::Ansi(0),
             "black is palette 0"
         );
@@ -1602,11 +1602,14 @@ magenta    = "magenta"
         };
 
         let kw = scope("keyword");
-        assert_eq!(SegmentColor::from_syntect(kw), SegmentColor::Ansi(5));
+        assert_eq!(
+            maki_highlight::segment_from_syntect(kw),
+            SegmentColor::Ansi(5)
+        );
 
         let comment = scope("comment");
         assert_eq!(
-            SegmentColor::from_syntect(comment),
+            maki_highlight::segment_from_syntect(comment),
             SegmentColor::Default,
             "default means terminal default"
         );
