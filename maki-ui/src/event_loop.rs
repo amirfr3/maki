@@ -1438,6 +1438,7 @@ impl<'t> EventLoop<'t> {
             id: rt.id().to_string(),
             cwd: app.state.session.cwd.clone(),
             title: Some(app.state.session.title.clone()),
+            title_user_set: app.state.session.is_title_user_set(),
             model: app.state.model.spec(),
             mode: if app.state.mode == Mode::Plan {
                 MODE_PLAN
