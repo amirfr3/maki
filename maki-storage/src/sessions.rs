@@ -3820,6 +3820,61 @@ mod tests {
     }
 
     #[test]
+    fn renamed_title_survives_auto_generation_and_reload() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let mut session: TestSession = Session::new("m", "/p");
+        let claim = claim_for(dir, &session);
+        session.set_user_title("my name".into());
+        session.push_message(user_message("later text"));
+        let mut log = SessionLog::rewrite(dir, &claim, &session).unwrap();
+        log.append(&claim, &session).unwrap();
+
+        // The checkpoint path auto-titles only sessions still on the default.
+        session.update_title_if_default();
+        assert_eq!(session.title, "my name");
+
+        let loaded = TestSession::load_from(session.id, dir).unwrap();
+        assert_eq!(loaded.title, "my name");
+        assert!(loaded.is_title_user_set());
+    }
+
+    #[test]
+    fn auto_title_still_generated_without_rename() {
+        let mut session: TestSession = Session::new("m", "/p");
+        session.push_message(user_message("hello world title source"));
+        session.update_title_if_default();
+        assert_ne!(session.title, "New session");
+        assert!(!session.is_title_user_set());
+    }
+
+    /// Logs written before the flag existed carry no `title_user_set` field;
+    /// those sessions must load as auto-generated, not fail or guess `true`.
+    #[test]
+    fn old_meta_records_without_the_flag_load_as_auto_generated() {
+        const OLD_TITLE: &str = "written by an older maki";
+
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let mut session: TestSession = Session::new("m", "/p");
+        let claim = claim_for(dir, &session);
+        session.set_title(OLD_TITLE.into());
+        let mut log = SessionLog::rewrite(dir, &claim, &session).unwrap();
+        log.append(&claim, &session).unwrap();
+
+        let path = jsonl_path(dir, session.id);
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(
+            !raw.contains("title_user_set"),
+            "the fixture must look like an old log"
+        );
+
+        let loaded = TestSession::load_from(session.id, dir).unwrap();
+        assert_eq!(loaded.title, OLD_TITLE);
+        assert!(!loaded.is_title_user_set());
+    }
+
+    #[test]
     fn scan_headers_reads_both_formats() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
