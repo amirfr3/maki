@@ -1085,6 +1085,7 @@ impl<'t> EventLoop<'t> {
                 json!({
                     "session_id": rt.id(),
                     "title": rt.last_title,
+                    "title_user_set": rt.app.state.session.is_title_user_set(),
                     "focused": i == self.focused,
                 }),
             );
