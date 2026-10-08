@@ -1965,4 +1965,125 @@ mod tests {
         assert_eq!(val, serde_json::Value::Null);
         assert_eq!(err.as_deref(), Some(STALE_RANGE_ERR));
     }
+
+    const BAD_COLOR: &str = "bananas";
+    const NOT_A_COLOR_PREFIX: &str = "not a color:";
+
+    /// Stands in for the event loop: holds the action channel, so a test
+    /// drains it when it chooses and no background thread can race the
+    /// assertions.
+    fn ui_with_theme_log() -> (Lua, flume::Receiver<UiAction>) {
+        let (tx, rx) = flume::unbounded::<UiAction>();
+        let lua = Lua::new();
+        let t = create_ui_table(&lua, Some(tx), Arc::from(INPUT_PLUGIN)).unwrap();
+        lua.globals().set("ui", t).unwrap();
+        (lua, rx)
+    }
+
+    fn theme_actions(rx: &flume::Receiver<UiAction>) -> Vec<(String, Option<String>)> {
+        rx.drain()
+            .filter_map(|a| match a {
+                UiAction::SetThemeColor { name, color } => Some((name, color)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// An unresolvable color must fail before it reaches the UI, where a
+    /// `None` color means "restore the theme color": silently resetting the
+    /// borders is the failure this guards against.
+    #[test]
+    fn set_theme_color_rejects_an_unresolvable_color() {
+        let (lua, rx) = ui_with_theme_log();
+        let (val, err) = eval(
+            &lua,
+            &format!(r#"return ui.set_theme_color("mode_build", "{BAD_COLOR}")"#),
+        );
+        assert_eq!(val, serde_json::Value::Null);
+        assert!(
+            err.as_deref()
+                .is_some_and(|e| e.contains(NOT_A_COLOR_PREFIX) && e.contains(BAD_COLOR)),
+            "error names the bad color: {err:?}"
+        );
+        assert!(theme_actions(&rx).is_empty(), "nothing reached the UI");
+    }
+
+    /// Hex, a palette name and the literal "default" are the three spellings
+    /// a picker offers; all must reach the UI as written.
+    #[test]
+    fn set_theme_color_applies_hex_palette_name_and_default() {
+        const MODE_STYLE: &str = "mode_build";
+        const HEX: &str = "#1e6bb8";
+        const PALETTE_NAME: &str = "blue";
+        const DEFAULT: &str = "default";
+
+        maki_highlight::set_theme_palette(std::collections::HashMap::from([(
+            PALETTE_NAME.to_owned(),
+            "#7aa2f7".to_owned(),
+        )]));
+        let (lua, rx) = ui_with_theme_log();
+        for color in [HEX, PALETTE_NAME, DEFAULT] {
+            let (val, err) = eval(
+                &lua,
+                &format!(r#"return ui.set_theme_color("{MODE_STYLE}", "{color}")"#),
+            );
+            assert_eq!(err, None, "resolvable color {color} applies");
+            assert_eq!(val, serde_json::Value::Bool(true));
+        }
+        assert_eq!(
+            theme_actions(&rx),
+            vec![
+                (MODE_STYLE.to_owned(), Some(HEX.to_owned())),
+                (MODE_STYLE.to_owned(), Some(PALETTE_NAME.to_owned())),
+                (MODE_STYLE.to_owned(), Some(DEFAULT.to_owned())),
+            ]
+        );
+        maki_highlight::set_theme_palette(std::collections::HashMap::new());
+    }
+
+    /// The restore path is a nil color, the only spelling the UI reads as
+    /// "back to the theme's own color".
+    #[test]
+    fn set_theme_color_nil_restores_the_theme_color() {
+        let (lua, rx) = ui_with_theme_log();
+        let (val, err) = eval(&lua, r#"return ui.set_theme_color("mode_build")"#);
+        assert_eq!(err, None);
+        assert_eq!(val, serde_json::Value::Bool(true));
+        assert_eq!(theme_actions(&rx), vec![("mode_build".to_owned(), None)]);
+    }
+
+    /// A picker built from the palette must offer exactly the colors the
+    /// running theme paints with, so the map round-trips by name.
+    #[test]
+    fn get_theme_palette_round_trips_the_running_palette() {
+        const PALETTE_BLUE: &str = "#7aa2f7";
+        const PALETTE_LOVE: &str = "#eb6f92";
+
+        maki_highlight::set_theme_palette(std::collections::HashMap::from([
+            ("blue".to_owned(), PALETTE_BLUE.to_owned()),
+            ("love".to_owned(), PALETTE_LOVE.to_owned()),
+        ]));
+        let (lua, _) = ui_with_theme_log();
+        let (val, err) = eval(&lua, "return ui.get_theme_palette()");
+        assert_eq!(err, None);
+        assert_eq!(
+            val,
+            serde_json::json!({
+                "blue": PALETTE_BLUE,
+                "love": PALETTE_LOVE,
+            })
+        );
+        maki_highlight::set_theme_palette(std::collections::HashMap::new());
+    }
+
+    /// A theme that names no colors must not leave the previous theme's
+    /// palette behind, or a picker would offer stale entries.
+    #[test]
+    fn get_theme_palette_is_empty_without_a_theme_palette() {
+        maki_highlight::set_theme_palette(std::collections::HashMap::new());
+        let (lua, _) = ui_with_theme_log();
+        let (val, err) = eval(&lua, "return ui.get_theme_palette()");
+        assert_eq!(err, None);
+        assert_eq!(val, serde_json::json!({}));
+    }
 }

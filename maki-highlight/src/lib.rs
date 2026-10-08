@@ -287,9 +287,7 @@ fn color_overrides_lock() -> &'static RwLock<HashMap<String, SegmentColor>> {
 /// published style. Returns false for a name no caller ever published, so
 /// typos fail loudly instead of silently painting nothing.
 pub fn set_style_override(name: &str, color: Option<SegmentColor>, known: &[&str]) -> bool {
-    if !known.contains(&name)
-        && !matches!(name, "mode_build" | "mode_plan" | "mode_bash")
-    {
+    if !known.contains(&name) && !matches!(name, "mode_build" | "mode_plan" | "mode_bash") {
         return false;
     }
     let mut map = color_overrides_lock()
@@ -351,25 +349,23 @@ pub fn set_theme_palette(palette: HashMap<String, String>) {
 /// Resolve {s} to a color the way the running theme would: a `[palette]`
 /// name first, then a literal.
 pub fn resolve_palette_color(s: &str) -> Option<SegmentColor> {
-let palette = theme_palette_lock()
-.read()
-.unwrap_or_else(|e| e.into_inner());
-if let Some(c) = palette.get(s).and_then(|hex| SegmentColor::parse(hex)) {
-return Some(c);
-}
-SegmentColor::parse(s)
+    let palette = theme_palette_lock()
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(c) = palette.get(s).and_then(|hex| SegmentColor::parse(hex)) {
+        return Some(c);
+    }
+    SegmentColor::parse(s)
 }
 
 /// The running theme's `[palette]`, name to `#rrggbb`. Empty when no theme
 /// with a palette is installed.
 pub fn theme_palette() -> HashMap<String, String> {
-theme_palette_lock()
-.read()
-.unwrap_or_else(|e| e.into_inner())
-.clone()
+    theme_palette_lock()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
 }
-
-/// Colors the syntax theme names itself. UI styles live in [`ui_style`].
 
 /// Colors the syntax theme names itself. UI styles live in [`ui_style`].
 pub fn theme_color(name: &str) -> Option<SegmentColor> {
@@ -1214,5 +1210,81 @@ mod tests {
         warmup();
         let out = highlight_ansi("rust", "let x = 1;\n", bg);
         assert!(out.contains(expected), "{out:?}");
+    }
+
+    const OVERRIDE_COLOR: SegmentColor = SegmentColor::Rgb((1, 2, 3));
+    const MODE_STYLE: &str = "mode_build";
+
+    /// Overrides are process globals like the theme, so every test that
+    /// touches them takes the lock and leaves the map empty behind it.
+    fn clear_overrides() {
+        for name in color_overrides() {
+            assert!(set_style_override(&name.0, None, &[]));
+        }
+    }
+
+    #[test]
+    fn override_roundtrip_and_clear() {
+        let _globals = exclusive_globals();
+        clear_overrides();
+
+        assert!(set_style_override(
+            "input_border",
+            Some(OVERRIDE_COLOR),
+            &["input_border"]
+        ));
+        assert_eq!(override_color("input_border"), Some(OVERRIDE_COLOR));
+
+        set_style_override("input_border", None, &["input_border"]);
+        assert_eq!(override_color("input_border"), None);
+    }
+
+    /// A typo must not read as "restore the theme color" downstream, so an
+    /// unpublished name is refused before anything is painted.
+    #[test]
+    fn override_rejects_unknown_style_names() {
+        let _globals = exclusive_globals();
+        clear_overrides();
+
+        assert!(!set_style_override(
+            "input_borders",
+            Some(OVERRIDE_COLOR),
+            &["input_border"]
+        ));
+        assert_eq!(override_color("input_borders"), None);
+    }
+
+    #[test]
+    fn mode_colors_are_overridable_without_a_published_style() {
+        let _globals = exclusive_globals();
+        clear_overrides();
+
+        assert!(set_style_override(MODE_STYLE, Some(OVERRIDE_COLOR), &[]));
+        assert_eq!(override_color(MODE_STYLE), Some(OVERRIDE_COLOR));
+        clear_overrides();
+    }
+
+    #[test]
+    fn palette_name_resolves_before_literal() {
+        let _globals = exclusive_globals();
+        const PALETTE_BLUE: &str = "#0a0b0c";
+        const LITERAL: &str = "#ffffff";
+
+        set_theme_palette(HashMap::from([(
+            "blue".to_owned(),
+            PALETTE_BLUE.to_owned(),
+        )]));
+
+        assert_eq!(
+            resolve_palette_color("blue"),
+            SegmentColor::parse(PALETTE_BLUE)
+        );
+        assert_eq!(resolve_palette_color(LITERAL), SegmentColor::parse(LITERAL));
+        assert_eq!(
+            theme_palette(),
+            HashMap::from([("blue".to_owned(), PALETTE_BLUE.to_owned())])
+        );
+
+        set_theme_palette(HashMap::new());
     }
 }

@@ -1087,6 +1087,31 @@ mod palette_roundtrip {
         assert_eq!(parse_span_color(name), None);
     }
 
+    /// A theme that names its colors lets a plugin paint in them by name:
+    /// "blue" resolves to the palette entry while it is installed, and
+    /// falls back to the ANSI name once the palette is empty again.
+    #[test]
+    fn span_colors_resolve_theme_palette_names() {
+        const PALETTE_BLUE: &str = "#7aa2f7";
+        const BLUE: &str = "blue";
+
+        maki_highlight::set_theme_palette(std::collections::HashMap::from([(
+            BLUE.to_owned(),
+            PALETTE_BLUE.to_owned(),
+        )]));
+        assert_eq!(
+            parse_span_color(BLUE),
+            Some(SpanColor::Rgb((0x7a, 0xa2, 0xf7)))
+        );
+
+        maki_highlight::set_theme_palette(std::collections::HashMap::new());
+        assert_eq!(
+            parse_span_color(BLUE),
+            Some(SpanColor::Ansi(4)),
+            "without a palette, blue is the ANSI name again"
+        );
+    }
+
     #[test_case(SpanColor::Ansi(4); "palette index")]
     #[test_case(SpanColor::Default(DefaultColor::Default); "terminal default")]
     #[test_case(SpanColor::Rgb((0x6f, 0xb3, 0xd2)); "rgb")]
