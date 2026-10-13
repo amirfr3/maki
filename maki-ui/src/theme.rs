@@ -516,6 +516,7 @@ named_styles!(t => {
     "warning" | "todo_in_progress" => t.todo_in_progress,
     "todo_pending" | "pending" => t.todo_pending,
     "todo_cancelled" | "cancelled" => t.todo_cancelled,
+    "input_border" => t.input_border,
 });
 
 #[derive(Debug)]
@@ -1511,6 +1512,7 @@ diff_new_line_nr = { fg = "red" }
         assert_eq!(style_by_name("match"), t.item_match);
         assert_eq!(style_by_name("match_selected"), t.item_match_selected);
         assert_eq!(style_by_name("thinking"), t.thinking);
+        assert_eq!(style_by_name("input_border"), t.input_border);
     }
 
     #[test_case("nonexistent_style")]
@@ -1518,6 +1520,43 @@ diff_new_line_nr = { fg = "red" }
     #[test_case("typo_keyword")]
     fn style_by_name_unknown_returns_default(name: &str) {
         assert_eq!(style_by_name(name), Style::default());
+    }
+
+    const OVERRIDE_HEX: &str = "#1e6bb8";
+    const OVERRIDE_FG: Color = Color::Rgb(0x1e, 0x6b, 0xb8);
+
+    /// The streaming separator paints with `input_border`, so a plugin
+    /// `set_theme_color("input_border", ...)` must land in the running theme
+    /// the same frame, not be rejected as an unknown style.
+    #[test]
+    fn set_theme_color_overrides_input_border() {
+        let _registry = maki_color::exclusive();
+        set(tokyonight());
+        let before = current().input_border.fg;
+
+        let color = SegmentColor::parse(OVERRIDE_HEX).expect("hex parses");
+        assert!(maki_color::Registry::set_override(
+            "input_border",
+            Some(color),
+            STYLE_NAMES
+        ));
+        patch_running_theme();
+
+        assert_eq!(current().input_border.fg, Some(OVERRIDE_FG));
+        assert_ne!(current().input_border.fg, before);
+        assert_eq!(
+            maki_color::Registry::style("input_border").and_then(|s| s.fg),
+            Some(color),
+            "get_theme_color must read the override"
+        );
+
+        assert!(maki_color::Registry::set_override(
+            "input_border",
+            None,
+            STYLE_NAMES
+        ));
+        patch_running_theme();
+        set(dracula());
     }
 
     const DRACULA_BG: Color = Color::Rgb(0x28, 0x2a, 0x36);
