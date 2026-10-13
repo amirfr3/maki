@@ -176,9 +176,9 @@ fn model_from_def(
         // Spelling out how a model thinks is as good as saying that it does.
         .or_else(|| row.thinking_fields.as_ref().map(|_| true))
         .or(Some(base.supports_thinking));
-    // Only the openai chat path merges the fragments into the body: the
-    // responses path has no thinking wiring yet, and anthropic and google spell
-    // thinking their own way. Anywhere else they would vanish without a trace.
+    // Only the openai chat and anthropic paths merge the fragments into the
+    // body: the responses path has no thinking wiring yet, and google spells
+    // thinking its own way. Anywhere else they would vanish without a trace.
     row.thinking_fields = match row.thinking_fields.take() {
         Some(fields) if matches!(def.protocol, Some(Protocol::Openai | Protocol::Anthropic)) => {
             Some(fields)
