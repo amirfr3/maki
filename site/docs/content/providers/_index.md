@@ -472,7 +472,7 @@ max = { reasoning_effort = "xhigh" }
 
 A mode you left out sends nothing. To get Ollama's own effort words (`low`, `medium`, `high`, and `none` when thinking is off) instead of writing every fragment yourself, use the built-in `ollama` slug: set `[ollama].base_url` (or `OLLAMA_HOST`) and give `[[ollama.models]]` the thinking keys. Only `supports_thinking`, `requires_thinking` and `thinking_fields` overlay onto a built-in slug. The rest of the entry stays ignored, and startup names the keys it dropped.
 
-Custom `anthropic`-protocol models can declare `thinking_fields` too. Each key is a thinking mode, and its JSON fragment replaces the built-in `thinking` block for that mode. What a mode the table leaves undeclared sends:
+Custom `anthropic`-protocol models can declare `thinking_fields` too. Each key is a thinking mode, and its JSON fragment replaces the built-in `thinking` block for that mode. A model without `thinking_fields` keeps the built-in block, the same request as before. What a mode the table leaves undeclared sends:
 
 - An effort level sends the fragment of the nearest declared level below it. When it sits below every declared level, it sends the lowest one. With only `low` and `high` declared, `medium` sends the `low` fragment and `max` sends the `high` fragment.
 - `off` sends nothing. Declare an `off` key if the gateway needs an explicit stop, as GLM does.
@@ -634,7 +634,7 @@ A row matches every model id that starts with one of its `prefixes`, and the lon
 
 An unset `supports_*` flag uses the codec or base provider's answer, and `false` turns the feature off for that model.
 
-`thinking_fields` works as in [providers.toml](#providers-toml). Keys are `off`, `adaptive` and the effort levels `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, each mapped to a JSON fragment merged into the request body. An undeclared effort level sends the fragment of the nearest declared level below it, or the lowest declared level, so effort never falls back to a built-in mapping. `off` and `adaptive` left undeclared send nothing with the other codecs, and fall back to the built-in mapping with `codec = "anthropic"`, `base = "llama-cpp"` or `base = "ollama"`.
+`thinking_fields` works as in [providers.toml](#providers-toml), including how an undeclared mode picks what to send. Keys are `off`, `adaptive` and the effort levels `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, each mapped to a JSON fragment merged into the request body. `off` and `adaptive` left undeclared send nothing with the other codecs, and fall back to the built-in mapping with `codec = "anthropic"`, `base = "llama-cpp"` or `base = "ollama"`.
 
 ### Hooks
 
