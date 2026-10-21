@@ -446,7 +446,7 @@ supports_vision = false
 | `supports_tool_examples` | bool | protocol default | |
 | `supports_thinking` | bool | protocol default | |
 | `requires_thinking` | bool | false | For APIs that reject requests with thinking disabled. Implies `supports_thinking` and raises thinking to minimal effort when off (including compaction). On generic `openai` entries without `thinking_fields` its only wire effect is that the `disabled` block is never sent |
-| `thinking_fields` | table | unset | How this model spells each thinking mode on the wire. The only thinking control on generic `openai` entries; on `anthropic` entries it wins over the built-in thinking spelling, mode by mode. Implies `supports_thinking`. A typo'd level key fails the parse (exit 2) |
+| `thinking_fields` | table | unset | How this model spells each thinking mode on the wire. The only thinking control on generic `openai` entries; on `anthropic` entries a mode the table spells replaces the built-in `thinking` block, and only `off` and `adaptive` left out fall back to it. Implies `supports_thinking`. A typo'd level key fails the parse (exit 2) |
 | `supports_vision` | bool | protocol default | When false, image input and `view_image` are off |
 | `pricing_input` / `pricing_output` | f64 | 0 | USD per 1M tokens |
 | `pricing_cache_write` / `pricing_cache_read` | f64 | 0 | USD per 1M tokens |
@@ -472,7 +472,7 @@ max = { reasoning_effort = "xhigh" }
 
 A mode you left out sends nothing. To get Ollama's own effort words (`low`, `medium`, `high`, and `none` when thinking is off) instead of writing every fragment yourself, use the built-in `ollama` slug: set `[ollama].base_url` (or `OLLAMA_HOST`) and give `[[ollama.models]]` the thinking keys. Only `supports_thinking`, `requires_thinking` and `thinking_fields` overlay onto a built-in slug. The rest of the entry stays ignored, and startup names the keys it dropped.
 
-Custom `anthropic`-protocol models can declare `thinking_fields` too. A mode the table spells merges its fragment ahead of the built-in `thinking` block. A mode left out falls back to the built-in spelling. A litellm-served GLM behind this protocol, for example, spells its effort knob like this:
+Custom `anthropic`-protocol models can declare `thinking_fields` too. Each key is a thinking mode, and its JSON fragment replaces the built-in `thinking` block for that mode. Effort levels snap to the declared ones, so a level the table does not spell sends the nearest one that it does. `off` and `adaptive` fall back to the built-in spelling when the table leaves them out. Thinking off sends nothing without an `off` key, so a GLM behind this protocol probably needs one. A litellm-served GLM, for example, spells its effort knob like this:
 
 ```toml
 [my-gateway]
@@ -628,7 +628,7 @@ A row matches every model id that starts with one of its `prefixes`, and the lon
 
 An unset `supports_*` flag uses the codec or base provider's answer, and `false` turns the feature off for that model.
 
-`thinking_fields` works as in [providers.toml](#providers-toml). Keys are `off`, `adaptive` and the effort levels `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, each mapped to a JSON fragment merged into the request body. A mode you leave out sends nothing with a codec, and falls back to the built-in mapping with `base = "llama-cpp"` or `base = "ollama"`.
+`thinking_fields` works as in [providers.toml](#providers-toml). Keys are `off`, `adaptive` and the effort levels `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, each mapped to a JSON fragment merged into the request body. Effort levels snap to the declared ones, so a level you leave out sends the nearest one you declared. `off` and `adaptive` left out send nothing with the other codecs, and fall back to the built-in mapping with `codec = "anthropic"`, `base = "llama-cpp"` or `base = "ollama"`.
 
 ### Hooks
 
