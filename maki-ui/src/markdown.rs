@@ -354,6 +354,56 @@ mod tests {
     }
 
     #[test]
+    fn diff_fence_uses_theme_diff_styles() {
+        let style = Style::default();
+        let lines = text_to_lines(
+            "```diff\n-old\n+new\n@@ -1 +1 @@\n```",
+            "",
+            style,
+            style,
+            TEST_WIDTH,
+        );
+        let t = theme::current();
+        assert_eq!(find_span(&lines, "-").style, t.diff_old_sign);
+        assert_eq!(find_span(&lines, "old").style, t.diff_old);
+        assert_eq!(find_span(&lines, "+").style, t.diff_new_sign);
+        assert_eq!(find_span(&lines, "new").style, t.diff_new);
+        assert_eq!(find_span(&lines, "@@ -1 +1 @@").style, t.tool_dim);
+    }
+
+    #[test]
+    fn diff_fence_with_lang_overlays_diff_style_under_syntax_colors() {
+        let style = Style::default();
+        let lines = text_to_lines(
+            "```diff:rust\n+fn wrapped() {}\n```",
+            "",
+            style,
+            style,
+            TEST_WIDTH,
+        );
+        let t = theme::current();
+        let sign = find_span(&lines, "+");
+        assert_eq!(sign.style, t.diff_new_sign);
+        let code_line = lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content.as_ref() == "+"))
+            .expect("line with the + sign");
+        let tokens: Vec<&Span<'_>> = code_line
+            .spans
+            .iter()
+            .filter(|s| s.content.as_ref() != CODE_BAR && s.content.as_ref() != "+")
+            .collect();
+        assert!(!tokens.is_empty());
+        for token in tokens {
+            assert_eq!(token.style.bg, t.diff_new.bg);
+            assert!(
+                token.style.fg.is_some(),
+                "the diff overlay must not eat the syntax fg"
+            );
+        }
+    }
+
+    #[test]
     fn heading_uses_theme_heading_style() {
         let style = Style::default();
         let lines = text_to_lines("# hello", "", style, style, TEST_WIDTH);

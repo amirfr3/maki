@@ -1689,6 +1689,7 @@ mod tests {
     use crate::plugin_permissions::{Permission, PluginPermissions, denied_error};
     use crate::runtime::mark_loaded;
     use maki_highlight::StyledSegment;
+    use maki_markdown::render::{DiffSide, StyleToken};
     use mlua::Lua;
     use test_case::test_case;
 
@@ -2343,6 +2344,53 @@ mod tests {
                     .unwrap_or(false),
                 underline
             );
+            assert_eq!(tbl.get::<Option<String>>("diff").unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn span_style_to_lua_highlight_carries_diff_side() {
+        let lua = Lua::new();
+        for (side, expected) in [(DiffSide::Old, "diff_old"), (DiffSide::New, "diff_new")] {
+            let span = maki_markdown::render::Span {
+                text: "tok".into(),
+                style: maki_markdown::render::StyleToken::Highlight {
+                    fg: SegmentColor::Rgb((255, 128, 0)),
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    diff: Some(side),
+                },
+                emphasis: maki_markdown::Emphasis::default(),
+            };
+            let val = span_style_to_lua(&lua, &span).unwrap();
+            let tbl = match val {
+                mlua::Value::Table(t) => t,
+                other => panic!("expected table, got {other:?}"),
+            };
+            assert_eq!(tbl.get::<String>("diff").unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn span_style_to_lua_diff_variants() {
+        let lua = Lua::new();
+        for (token, expected) in [
+            (StyleToken::DiffOld, "diff_old"),
+            (StyleToken::DiffNew, "diff_new"),
+            (StyleToken::DiffOldSign, "diff_old_sign"),
+            (StyleToken::DiffNewSign, "diff_new_sign"),
+            (StyleToken::DiffMeta, "dim"),
+        ] {
+            let span = maki_markdown::render::Span {
+                text: "x".into(),
+                style: token,
+                emphasis: maki_markdown::Emphasis::default(),
+            };
+            match span_style_to_lua(&lua, &span).unwrap() {
+                mlua::Value::String(s) => assert_eq!(s.to_string_lossy(), expected),
+                other => panic!("expected string for {expected}, got {other:?}"),
+            }
         }
     }
 

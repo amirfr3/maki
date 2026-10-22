@@ -365,13 +365,14 @@ fn diff_line_kind(line: &str) -> DiffLineKind {
     }
 }
 
-/// Drops each line's first character (the diff marker) so a syntax
-/// highlighter sees valid source. Line count is preserved exactly.
+/// Drops each line's diff marker (` `, `+`, `-`) so a syntax highlighter
+/// sees valid source. Lines that start with anything else are left alone;
+/// line count is preserved exactly.
 fn strip_diff_markers(code: &str) -> String {
     code.split_inclusive('\n')
-        .map(|line| match line.char_indices().nth(1) {
-            Some((i, _)) => &line[i..],
-            None => "",
+        .map(|line| match line.as_bytes().first() {
+            Some(b' ') | Some(b'+') | Some(b'-') => &line[1..],
+            _ => line,
         })
         .collect()
 }
@@ -427,8 +428,10 @@ fn render_diff_code(lines: &mut Vec<Line>, code: &str, inner: Option<&str>, widt
                 }),
                 Some(_) => {
                     let mut segs = segs;
-                    if let Some(first) = segs.first_mut() {
-                        first.text.insert(0, ' ');
+                    if line.starts_with(' ') {
+                        if let Some(first) = segs.first_mut() {
+                            first.text.insert(0, ' ');
+                        }
                     }
                     push_code_segments(lines, segs, None);
                 }
@@ -1402,6 +1405,69 @@ mod tests {
                 .iter()
                 .any(|s| matches!(s.style, StyleToken::Highlight { .. }))
         }));
+    }
+
+    #[test]
+    fn diff_fence_edge_lines() {
+        // no trailing newline, a bare marker, and a "\ No newline" note
+        let lines = render(
+            "```diff\n+only\n\\ No newline at end of file\n```",
+            TEST_WIDTH,
+        );
+        let code: Vec<&Line> = lines.iter().filter(|l| l.kind == LineKind::Code).collect();
+        assert_eq!(code.len(), 2, "{:?}", lines_text(&lines));
+        assert_eq!(code[0].spans[1].text, "+");
+        assert_eq!(code[0].spans[1].style, StyleToken::DiffNewSign);
+        assert_eq!(code[1].spans[1].text, "\\ No newline at end of file");
+        assert_eq!(code[1].spans[1].style, StyleToken::DiffMeta);
+    }
+
+    #[test]
+    fn diff_fence_empty_body_renders_no_code_lines() {
+        let lines = render("```diff\n```", TEST_WIDTH);
+        assert!(!lines.iter().any(|l| l.kind == LineKind::Code));
+    }
+
+    #[test]
+    fn diff_fence_with_lang_keeps_markerless_context_line_intact() {
+        let lines = render("```diff:python\nx = 1\n```", TEST_WIDTH);
+        let code: Vec<&Line> = lines.iter().filter(|l| l.kind == LineKind::Code).collect();
+        assert_eq!(code.len(), 1, "{:?}", lines_text(&lines));
+        let text: String = code[0].spans[1..].iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(text, "x = 1");
+        assert!(
+            code[0].spans[1..]
+                .iter()
+                .all(|s| matches!(&s.style, StyleToken::Highlight { diff: None, .. }))
+        );
+    }
+
+    #[test]
+    fn diff_fence_wrapping_keeps_the_side_on_continuation_lines() {
+        let long = format!("+fn a() {{ let x = \"{}\"; }}", "y".repeat(60));
+        let md = format!("```diff:rust\n{long}\n```");
+        let lines = render(&md, NARROW_WIDTH);
+        let wrapped: Vec<&Line> = lines.iter().filter(|l| l.kind == LineKind::Code).collect();
+        assert!(wrapped.len() > 1);
+        for line in &wrapped {
+            assert!(
+                line.spans[1..].iter().all(|s| matches!(
+                    &s.style,
+                    StyleToken::DiffNewSign
+                        | StyleToken::Highlight {
+                            diff: Some(DiffSide::New),
+                            ..
+                        }
+                )),
+                "side lost on {:?}",
+                line.spans
+            );
+        }
+        let joined: String = wrapped
+            .iter()
+            .flat_map(|l| l.spans[1..].iter().map(|s| s.text.as_str()))
+            .collect();
+        assert_eq!(joined, long);
     }
 
     #[test]
