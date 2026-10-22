@@ -400,12 +400,11 @@ fn push_code_segments(lines: &mut Vec<Line>, segs: Vec<StyledSegment>, diff: Opt
 
 fn render_diff_code(lines: &mut Vec<Line>, code: &str, inner: Option<&str>, width: u16) {
     let start = lines.len();
+    // A plain diff highlights through the same plain-text syntax a bare
+    // fence uses, so unformatted lines match normal code blocks.
     let segments: Vec<Vec<StyledSegment>> = match inner {
         Some(lang) => maki_highlight::highlight_lines_independent(lang, &strip_diff_markers(code)),
-        None => code
-            .lines()
-            .map(|l| vec![StyledSegment::fallback(l.to_owned())])
-            .collect(),
+        None => maki_highlight::highlight_lines_independent("", code),
     };
 
     for (line, segs) in code.lines().zip(segments) {
@@ -419,13 +418,7 @@ fn render_diff_code(lines: &mut Vec<Line>, code: &str, inner: Option<&str>, widt
                 ],
             }),
             DiffLineKind::Context => match inner {
-                None => lines.push(Line {
-                    kind: LineKind::Code,
-                    spans: vec![
-                        Span::new(CODE_BAR, StyleToken::CodeBar),
-                        Span::new(line, StyleToken::Text),
-                    ],
-                }),
+                None => push_code_segments(lines, segs, None),
                 Some(_) => {
                     let mut segs = segs;
                     if line.starts_with(' ') {
@@ -1348,7 +1341,10 @@ mod tests {
         assert_eq!(style_of(code[3], "old"), &StyleToken::DiffOld);
         assert_eq!(style_of(code[4], "+"), &StyleToken::DiffNewSign);
         assert_eq!(style_of(code[4], "new"), &StyleToken::DiffNew);
-        assert_eq!(style_of(code[5], " keep"), &StyleToken::Text);
+        assert!(matches!(
+            style_of(code[5], " keep"),
+            StyleToken::Highlight { diff: None, .. }
+        ));
 
         for (line, expected) in code.iter().zip([
             "--- a/x.py",
@@ -1405,6 +1401,21 @@ mod tests {
                 .iter()
                 .any(|s| matches!(s.style, StyleToken::Highlight { .. }))
         }));
+    }
+
+    #[test]
+    fn plain_diff_context_line_matches_a_bare_code_block_line() {
+        let diff = render("```diff\n ctx\n```", TEST_WIDTH);
+        let bare = render("```\n ctx\n```", TEST_WIDTH);
+        let diff_line = diff
+            .iter()
+            .find(|l| l.kind == LineKind::Code)
+            .expect("diff code line");
+        let bare_line = bare
+            .iter()
+            .find(|l| l.kind == LineKind::Code)
+            .expect("bare code line");
+        assert_eq!(diff_line.spans, bare_line.spans);
     }
 
     #[test]
