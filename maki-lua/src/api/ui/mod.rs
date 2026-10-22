@@ -1599,7 +1599,7 @@ fn segments_to_lua_lines(
 /// No wildcard arm on `StyleToken`: adding a variant is a compile error
 /// here, so we can't forget to map it.
 fn span_style_to_lua(lua: &Lua, span: &maki_markdown::render::Span) -> LuaResult<mlua::Value> {
-    use maki_markdown::render::StyleToken;
+    use maki_markdown::render::{DiffSide, StyleToken};
 
     let v = match &span.style {
         StyleToken::Text => {
@@ -1612,6 +1612,7 @@ fn span_style_to_lua(lua: &Lua, span: &maki_markdown::render::Span) -> LuaResult
             bold,
             italic,
             underline,
+            diff,
         } => {
             let tbl = lua.create_table()?;
             tbl.set("fg", segment_color_to_lua(*fg))?;
@@ -1624,6 +1625,13 @@ fn span_style_to_lua(lua: &Lua, span: &maki_markdown::render::Span) -> LuaResult
             if *underline {
                 tbl.set("underline", true)?;
             }
+            if let Some(side) = diff {
+                let name = match side {
+                    DiffSide::Old => "diff_old",
+                    DiffSide::New => "diff_new",
+                };
+                tbl.set("diff", name)?;
+            }
             mlua::Value::Table(tbl)
         }
         StyleToken::CodeBar => mlua::Value::String(lua.create_string("code_gutter")?),
@@ -1631,6 +1639,11 @@ fn span_style_to_lua(lua: &Lua, span: &maki_markdown::render::Span) -> LuaResult
         StyleToken::ListMarker => mlua::Value::String(lua.create_string("list_marker")?),
         StyleToken::TableBorder => mlua::Value::String(lua.create_string("table_border")?),
         StyleToken::HorizontalRule => mlua::Value::String(lua.create_string("horizontal_rule")?),
+        StyleToken::DiffOld => mlua::Value::String(lua.create_string("diff_old")?),
+        StyleToken::DiffNew => mlua::Value::String(lua.create_string("diff_new")?),
+        StyleToken::DiffOldSign => mlua::Value::String(lua.create_string("diff_old_sign")?),
+        StyleToken::DiffNewSign => mlua::Value::String(lua.create_string("diff_new_sign")?),
+        StyleToken::DiffMeta => mlua::Value::String(lua.create_string("dim")?),
     };
     Ok(v)
 }
@@ -2309,6 +2322,7 @@ mod tests {
                     bold,
                     italic,
                     underline,
+                    diff: None,
                 },
                 emphasis: maki_markdown::Emphasis::default(),
             };

@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use crate::theme;
 use crate::theme::Theme;
 use maki_markdown::Emphasis;
-use maki_markdown::render::{self, Line as RLine, LineKind, Span as RSpan, StyleToken};
+use maki_markdown::render::{self, DiffSide, Line as RLine, LineKind, Span as RSpan, StyleToken};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
@@ -74,6 +74,7 @@ fn style_for_token(
             bold,
             italic,
             underline,
+            diff,
         } => {
             let mut s = theme::segment_style(*fg);
             if *bold {
@@ -85,12 +86,21 @@ fn style_for_token(
             if *underline {
                 s = s.add_modifier(Modifier::UNDERLINED);
             }
-            s
+            match diff {
+                Some(DiffSide::Old) => overlay_style(s, t.diff_old),
+                Some(DiffSide::New) => overlay_style(s, t.diff_new),
+                None => s,
+            }
         }
         StyleToken::CodeBar => t.code_gutter,
         StyleToken::ListMarker => t.list_marker,
         StyleToken::TableBorder => t.table_border,
         StyleToken::HorizontalRule => t.horizontal_rule,
+        StyleToken::DiffOld => t.diff_old,
+        StyleToken::DiffNew => t.diff_new,
+        StyleToken::DiffOldSign => t.diff_old_sign,
+        StyleToken::DiffNewSign => t.diff_new_sign,
+        StyleToken::DiffMeta => t.tool_dim,
     }
 }
 

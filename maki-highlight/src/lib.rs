@@ -402,7 +402,7 @@ impl StyledSegment {
         }
     }
 
-    fn fallback(text: String) -> Self {
+    pub fn fallback(text: String) -> Self {
         Self {
             text,
             fg: SegmentColor::Default,
