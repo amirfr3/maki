@@ -96,10 +96,12 @@ fn style_for_token(
         StyleToken::ListMarker => t.list_marker,
         StyleToken::TableBorder => t.table_border,
         StyleToken::HorizontalRule => t.horizontal_rule,
-        StyleToken::DiffOld => t.diff_old,
-        StyleToken::DiffNew => t.diff_new,
-        StyleToken::DiffOldSign => t.diff_old_sign,
-        StyleToken::DiffNewSign => t.diff_new_sign,
+        // Diff styles carry only a background; the code_block fg paints the
+        // text on it, exactly like the standalone diff renderer in code_view.
+        StyleToken::DiffOld => overlay_style(t.diff_old, t.code_block),
+        StyleToken::DiffNew => overlay_style(t.diff_new, t.code_block),
+        StyleToken::DiffOldSign => overlay_style(t.code_block, t.diff_old_sign),
+        StyleToken::DiffNewSign => overlay_style(t.code_block, t.diff_new_sign),
         StyleToken::DiffMeta => t.tool_dim,
     }
 }
@@ -364,10 +366,22 @@ mod tests {
             TEST_WIDTH,
         );
         let t = theme::current();
-        assert_eq!(find_span(&lines, "-").style, t.diff_old_sign);
-        assert_eq!(find_span(&lines, "old").style, t.diff_old);
-        assert_eq!(find_span(&lines, "+").style, t.diff_new_sign);
-        assert_eq!(find_span(&lines, "new").style, t.diff_new);
+        assert_eq!(
+            find_span(&lines, "-").style,
+            overlay_style(t.code_block, t.diff_old_sign)
+        );
+        assert_eq!(
+            find_span(&lines, "old").style,
+            overlay_style(t.diff_old, t.code_block)
+        );
+        assert_eq!(
+            find_span(&lines, "+").style,
+            overlay_style(t.code_block, t.diff_new_sign)
+        );
+        assert_eq!(
+            find_span(&lines, "new").style,
+            overlay_style(t.diff_new, t.code_block)
+        );
         assert_eq!(find_span(&lines, "@@ -1 +1 @@").style, t.tool_dim);
     }
 
@@ -383,7 +397,7 @@ mod tests {
         );
         let t = theme::current();
         let sign = find_span(&lines, "+");
-        assert_eq!(sign.style, t.diff_new_sign);
+        assert_eq!(sign.style, overlay_style(t.code_block, t.diff_new_sign));
         let code_line = lines
             .iter()
             .find(|l| l.spans.iter().any(|s| s.content.as_ref() == "+"))
