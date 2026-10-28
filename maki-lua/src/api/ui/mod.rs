@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use maki_agent::UiWaker;
 use maki_agent::tools::compact_duration;
-use maki_highlight::{DEFAULT_COLOR_NAME, SegmentColor};
+use maki_color::DEFAULT_COLOR_NAME;
+use maki_highlight::SegmentColor;
 use maki_lua_macro::{lua_fn, lua_table};
 use maki_storage::id::{MakiId, MakiIdParseError};
 use mlua::{Lua, Result as LuaResult, Table};
@@ -479,9 +480,11 @@ fn set_window_title(
 /// because it patches whatever theme is running rather than replacing it.
 ///
 /// Valid names are the ones `maki.ui.theme_style` accepts ("dim",
-/// "input_border", "accent", ...), plus the three mode colors
+/// "input_border", "accent", ...), except "background" and "foreground",
+/// which have no foreground field of their own, plus the three mode colors
 /// "mode_build", "mode_plan", and "mode_bash" that paint the input box
 /// border. Only the foreground changes; modifiers and backgrounds stay.
+/// A name outside that list returns `nil` and an error.
 ///
 /// @param name string Style name, e.g. "input_border" or "mode_build".
 /// @param color string|nil `#rrggbb`, an ANSI palette index like "4", or nil to restore the theme color.
@@ -512,6 +515,12 @@ fn set_theme_color(
     let Some(tx) = tx else {
         return Ok((None, Some("no interactive UI attached".to_owned())));
     };
+    // The UI thread refuses an unknown name too, but this answer reaches the
+    // plugin first. A name the screen would not paint must not read as
+    // applied.
+    if !maki_color::Registry::is_settable(&name) {
+        return Ok((None, Some(format!("unknown style: {name}"))));
+    }
     if ui_send(Some(&tx), UiAction::SetThemeColor { name, color }).is_err() {
         return Ok((None, Some("UI is shutting down".to_owned())));
     }
@@ -532,16 +541,12 @@ fn set_theme_color(
 /// end
 #[lua_fn]
 fn get_theme_color(_lua: &Lua, name: String) -> LuaResult<(Option<String>, Option<String>)> {
-    if let Some(style) = maki_color::Registry::style(&name) {
-        return Ok((style.fg.map(segment_color_to_lua), None));
+    // The mode colors are published as styles too, so one lookup covers
+    // every name a UI can paint.
+    match maki_color::Registry::style(&name) {
+        Some(style) => Ok((style.fg.map(segment_color_to_lua), None)),
+        None => Ok((None, Some(format!("unknown style: {name}")))),
     }
-    if matches!(name.as_str(), "mode_build" | "mode_plan" | "mode_bash") {
-        if let Some(c) = maki_color::Registry::override_color(&name) {
-            return Ok((Some(segment_color_to_lua(c)), None));
-        }
-        return Ok((Some("default".to_owned()), None));
-    }
-    Ok((None, Some(format!("unknown style: {name}"))))
 }
 
 /// Reads the running theme's `[palette]`: color name to `#rrggbb`, e.g.
@@ -2843,6 +2848,24 @@ mod tests {
             err.as_deref()
                 .is_some_and(|e| e.contains(NOT_A_COLOR_PREFIX) && e.contains(BAD_COLOR)),
             "error names the bad color: {err:?}"
+        );
+        assert!(theme_actions(&rx).is_empty(), "nothing reached the UI");
+    }
+
+    /// A typo'd name must not read as applied. The UI thread would only
+    /// log a warning, after the plugin already got `true`.
+    #[test]
+    fn set_theme_color_rejects_an_unknown_style_name() {
+        let (lua, rx) = ui_with_theme_log();
+        let (val, err) = eval(
+            &lua,
+            r##"return ui.set_theme_color("input_borders", "#ff0000")"##,
+        );
+        assert_eq!(val, serde_json::Value::Null);
+        assert!(
+            err.as_deref()
+                .is_some_and(|e| e.contains("unknown style") && e.contains("input_borders")),
+            "error names the bad style: {err:?}"
         );
         assert!(theme_actions(&rx).is_empty(), "nothing reached the UI");
     }
