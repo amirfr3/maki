@@ -494,6 +494,9 @@ output_config = { effort = "low" }
 [my-gateway.models.thinking_fields.high]
 thinking = { type = "adaptive" }
 output_config = { effort = "high" }
+
+[my-gateway.models.thinking_fields.off]
+thinking = { type = "disabled" }
 ```
 
 You can also create a custom provider interactively with `maki auth login` and choosing the custom option. That writes a starter entry to this file.
