@@ -11,7 +11,7 @@ use syntect::highlighting::{
 use syntect::parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet};
 use syntect::util::LinesWithEndings;
 
-pub use maki_color::{DEFAULT_COLOR_NAME, SegmentColor, UiStyle, ansi_color_index};
+pub use maki_color::{DEFAULT_COLOR_NAME, SegmentColor, ansi_color_index};
 
 pub mod pool;
 
@@ -178,7 +178,7 @@ pub fn theme() -> Arc<Theme> {
         .clone()
 }
 
-/// Colors the syntax theme names itself. UI styles live in [`ui_style`].
+/// Colors the syntax theme names itself. UI styles live in `maki_color`.
 pub fn theme_color(name: &str) -> Option<SegmentColor> {
     let settings = &theme().settings;
     let map = serde_json::to_value(settings).ok()?;

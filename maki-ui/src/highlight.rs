@@ -2,7 +2,8 @@ use crate::theme;
 
 use std::collections::HashMap;
 
-use maki_highlight::{StyledSegment, UiStyle};
+use maki_color::UiStyle;
+use maki_highlight::StyledSegment;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
 
@@ -41,13 +42,13 @@ pub(crate) fn refresh_syntax_theme() {
             },
         );
     }
-    maki_color::Registry::set_styles(styles);
+    maki_color::Registry::set_styles(styles, theme::SETTABLE_STYLE_NAMES);
     maki_color::Registry::set_palette(theme.palette.clone());
 }
 
-fn ui_style(style: Style) -> maki_highlight::UiStyle {
+fn ui_style(style: Style) -> UiStyle {
     let has = |m: Modifier| style.add_modifier.contains(m);
-    maki_highlight::UiStyle {
+    UiStyle {
         fg: style.fg.map(theme::segment_color),
         bg: style.bg.map(theme::segment_color),
         bold: has(Modifier::BOLD),

@@ -5,7 +5,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use arc_swap::{ArcSwap, Guard};
 use maki_agent::SpanColor;
-use maki_highlight::SegmentColor;
+use maki_color::SegmentColor;
 use maki_storage::StateDir;
 use ratatui::style::{Color, Modifier, Style};
 use serde::Deserialize;
@@ -273,6 +273,12 @@ pub static BUNDLED_THEMES: &[ThemeEntry] = &[
 static THEME: LazyLock<ArcSwap<Theme>> =
     LazyLock::new(|| ArcSwap::from_pointee(Theme::load_or_bundled()));
 
+/// The loaded theme before any runtime override. Every patch rebuilds from
+/// this, so clearing an override restores the theme's own color instead of
+/// keeping the last one baked in.
+static BASE: LazyLock<ArcSwap<Theme>> =
+    LazyLock::new(|| ArcSwap::from_pointee(Theme::load_or_bundled()));
+
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
 static CURSOR_FOCUSED: AtomicBool = AtomicBool::new(true);
@@ -286,6 +292,7 @@ pub fn current() -> Guard<Arc<Theme>> {
 pub fn set(theme: Theme) {
     // Order matters: install colors before bumping the counter, otherwise a
     // reader could see the new generation but bake with the old palette.
+    BASE.store(Arc::new(theme.clone()));
     let mut theme = theme;
     reapply_overrides(&mut theme);
     THEME.store(Arc::new(theme));
@@ -310,12 +317,10 @@ fn reapply_overrides(theme: &mut Theme) {
 /// on the UI thread after a plugin changes one through
 /// `maki.ui.set_theme_color`, so the next frame paints with it.
 pub(crate) fn patch_running_theme() {
-    let owned = Arc::try_unwrap(THEME.load_full())
-        .ok()
-        .or_else(|| load_by_name(&current_theme_name()).ok());
-    let Some(mut theme) = owned else {
-        return;
-    };
+    // Rebuild from the loaded theme. Cloning the running one would keep a
+    // cleared override baked in, and `Arc::try_unwrap` cannot succeed on an
+    // `ArcSwap` slot.
+    let mut theme = (**BASE.load()).clone();
     reapply_overrides(&mut theme);
     THEME.store(Arc::new(theme));
     crate::highlight::refresh_syntax_theme();
@@ -324,32 +329,17 @@ pub(crate) fn patch_running_theme() {
 
 fn apply_override(theme: &mut Theme, name: &str, color: SegmentColor) {
     let c = to_color(color);
-    let field: Option<&mut Style> = match name {
-        "input_border" => Some(&mut theme.input_border),
-        "accent" => Some(&mut theme.accent),
-        "dim" | "tool_dim" => Some(&mut theme.tool_dim),
-        "mode_build" => {
-            theme.mode_build = c;
-            return;
-        }
-        "mode_plan" => {
-            theme.mode_plan = c;
-            return;
-        }
-        "mode_bash" => {
-            theme.mode_bash = c;
-            return;
-        }
-        _ => None,
-    };
-    match field {
-        Some(style) => {
-            style.fg = Some(c);
-        }
-        None => {
-            // A style the struct holds by name only: read through
-            // style_by_name, which merges the Registry override on read.
-        }
+    if let Some(style) = style_by_name_mut(theme, name) {
+        style.fg = Some(c);
+        return;
+    }
+    // The three mode colors are not `Style` fields, so they paint from a
+    // bare `Color`.
+    match name {
+        "mode_build" => theme.mode_build = c,
+        "mode_plan" => theme.mode_plan = c,
+        "mode_bash" => theme.mode_bash = c,
+        _ => {}
     }
 }
 
@@ -453,73 +443,93 @@ pub fn current_theme_name() -> String {
 /// One list of names feeds both the span lookup and what Lua sees, so a name a
 /// plugin can write in a span is always one it can look up too.
 macro_rules! named_styles {
-    ($t:ident => { $($($name:literal)|+ => $style:expr),+ $(,)? }) => {
-        pub const STYLE_NAMES: &[&str] = &[$($($name),+),+];
+    ($t:ident => {
+        $($($name:literal)|+ => $field:ident),+ $(,)?
+        ; derived: $($($dname:literal)|+ => $dstyle:expr),* $(,)?
+    }) => {
+        /// Every published style name, in one list.
+        pub const STYLE_NAMES: &[&str] = &[$($($name),+),+ $(, $($dname),+)*];
+
+        /// The names whose foreground `set_theme_color` can override. A
+        /// derived style builds its `Style` from a `Theme` color, so it has
+        /// no field to patch.
+        pub const SETTABLE_STYLE_NAMES: &[&str] = &[$($($name),+),+];
 
         pub fn style_by_name(name: &str) -> Style {
             let $t = current();
             match name {
-                $($($name)|+ => $style,)+
+                $($($name)|+ => $t.$field,)+
+                $($($dname)|+ => $dstyle,)*
                 _ => Style::default(),
+            }
+        }
+
+        /// The `Theme` field {name} paints with, for a runtime override. A
+        /// derived name returns `None`.
+        fn style_by_name_mut<'a>($t: &'a mut Theme, name: &str) -> Option<&'a mut Style> {
+            match name {
+                $($($name)|+ => Some(&mut $t.$field),)+
+                _ => None,
             }
         }
     };
 }
 
 named_styles!(t => {
-    "dim" | "tool_dim" => t.tool_dim,
-    "path" | "tool_path" => t.tool_path,
-    "tool" => t.tool,
-    "tool_prefix" => t.tool_prefix,
-    "tool_success" => t.tool_success,
-    "tool_error" => t.tool_error,
-    "tool_annotation" => t.tool_annotation,
-    "spinner" => t.spinner,
-    "thinking" => t.thinking,
-    "error" => t.error,
-    "bold" => t.bold,
-    "italic" => t.italic,
-    "bold_italic" => t.bold_italic,
-    "inline_code" => t.inline_code,
-    "strikethrough" => t.strikethrough,
-    "heading" => t.heading,
-    "list_marker" => t.list_marker,
-    "horizontal_rule" => t.horizontal_rule,
-    "code_gutter" => t.code_gutter,
-    "table_border" => t.table_border,
-    "keyword" | "index_keyword" => t.index_keyword,
-    "section" | "index_section" => t.index_section,
-    "line_nr" | "index_line_nr" => t.index_line_nr,
-    "diff_old" => t.diff_old,
-    "diff_new" => t.diff_new,
-    "diff_old_sign" => t.diff_old_sign,
-    "diff_new_sign" => t.diff_new_sign,
-    "diff_line_nr" => t.diff_line_nr,
-    "diff_old_line_nr" => t.diff_old_line_nr,
-    "diff_new_line_nr" => t.diff_new_line_nr,
-    "item" => t.item,
-    "item_desc" => t.item_desc,
-    "item_selected" | "selected" => t.item_selected,
-    "item_match" | "match" => t.item_match,
-    "item_match_selected" | "match_selected" => t.item_match_selected,
-    "cursor" => t.cursor,
-    "cursor_unfocused" => t.cursor_unfocused,
+    "dim" | "tool_dim" => tool_dim,
+    "path" | "tool_path" => tool_path,
+    "tool" => tool,
+    "tool_prefix" => tool_prefix,
+    "tool_success" => tool_success,
+    "tool_error" => tool_error,
+    "tool_annotation" => tool_annotation,
+    "spinner" => spinner,
+    "thinking" => thinking,
+    "error" => error,
+    "bold" => bold,
+    "italic" => italic,
+    "bold_italic" => bold_italic,
+    "inline_code" => inline_code,
+    "strikethrough" => strikethrough,
+    "heading" => heading,
+    "list_marker" => list_marker,
+    "horizontal_rule" => horizontal_rule,
+    "code_gutter" => code_gutter,
+    "table_border" => table_border,
+    "keyword" | "index_keyword" => index_keyword,
+    "section" | "index_section" => index_section,
+    "line_nr" | "index_line_nr" => index_line_nr,
+    "diff_old" => diff_old,
+    "diff_new" => diff_new,
+    "diff_old_sign" => diff_old_sign,
+    "diff_new_sign" => diff_new_sign,
+    "diff_line_nr" => diff_line_nr,
+    "diff_old_line_nr" => diff_old_line_nr,
+    "diff_new_line_nr" => diff_new_line_nr,
+    "item" => item,
+    "item_desc" => item_desc,
+    "item_selected" | "selected" => item_selected,
+    "item_match" | "match" => item_match,
+    "item_match_selected" | "match_selected" => item_match_selected,
+    "cursor" => cursor,
+    "cursor_unfocused" => cursor_unfocused,
+    "accent" => accent,
+    "shell_prefix" => shell_prefix,
+    "active" => active,
+    "keybind_key" => keybind_key,
+    "keybind_desc" => keybind_desc,
+    "keybind_section" => keybind_section,
+    "success" | "todo_completed" => todo_completed,
+    "warning" | "todo_in_progress" => todo_in_progress,
+    "todo_pending" | "pending" => todo_pending,
+    "todo_cancelled" | "cancelled" => todo_cancelled,
+    "input_border" => input_border,
+    ; derived:
     "background" => Style::new().bg(t.background),
     "foreground" => Style::new().fg(t.foreground),
-    "accent" => t.accent,
-    "shell_prefix" => t.shell_prefix,
-    "active" => t.active,
-    "keybind_key" => t.keybind_key,
-    "keybind_desc" => t.keybind_desc,
-    "keybind_section" => t.keybind_section,
-    "success" | "todo_completed" => t.todo_completed,
-    "warning" | "todo_in_progress" => t.todo_in_progress,
-    "todo_pending" | "pending" => t.todo_pending,
-    "todo_cancelled" | "cancelled" => t.todo_cancelled,
-    "input_border" => t.input_border,
 });
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Theme {
     pub background: Color,
     pub foreground: Color,
@@ -1112,7 +1122,7 @@ fn brighten_toward(style: Style, from: Color, to: Color, t: f32) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use maki_highlight::UiStyle;
+    use maki_color::UiStyle;
     use test_case::test_case;
 
     #[test_case(Color::Rgb(1, 2, 3), SegmentColor::Rgb((1, 2, 3)); "truecolor")]
@@ -1525,20 +1535,37 @@ diff_new_line_nr = { fg = "red" }
     const OVERRIDE_HEX: &str = "#1e6bb8";
     const OVERRIDE_FG: Color = Color::Rgb(0x1e, 0x6b, 0xb8);
 
+    /// Puts back the theme the case found, so the next case starts from the
+    /// same state.
+    struct ThemeRestore(Theme);
+
+    impl ThemeRestore {
+        fn new() -> Self {
+            Self((**current()).clone())
+        }
+    }
+
+    impl Drop for ThemeRestore {
+        fn drop(&mut self) {
+            maki_color::Registry::reset_overrides();
+            set(self.0.clone());
+        }
+    }
+
     /// The streaming separator paints with `input_border`, so a plugin
     /// `set_theme_color("input_border", ...)` must land in the running theme
     /// the same frame, not be rejected as an unknown style.
     #[test]
     fn set_theme_color_overrides_input_border() {
         let _registry = maki_color::exclusive();
+        let _restore = ThemeRestore::new();
         set(tokyonight());
         let before = current().input_border.fg;
 
         let color = SegmentColor::parse(OVERRIDE_HEX).expect("hex parses");
         assert!(maki_color::Registry::set_override(
             "input_border",
-            Some(color),
-            STYLE_NAMES
+            Some(color)
         ));
         patch_running_theme();
 
@@ -1550,13 +1577,63 @@ diff_new_line_nr = { fg = "red" }
             "get_theme_color must read the override"
         );
 
+        assert!(maki_color::Registry::set_override("input_border", None));
+        patch_running_theme();
+        assert_eq!(current().input_border.fg, before);
+    }
+
+    /// Every published field repaints, not only the five a hand-written
+    /// match once covered. `path` is painted through `style_by_name`, which
+    /// is the path a plugin's override must reach.
+    #[test]
+    fn set_theme_color_overrides_any_settable_field() {
+        let _registry = maki_color::exclusive();
+        let _restore = ThemeRestore::new();
+        set(tokyonight());
+        let before = style_by_name("path").fg;
+
+        let color = SegmentColor::parse(OVERRIDE_HEX).expect("hex parses");
+        assert!(maki_color::Registry::set_override("path", Some(color)));
+        patch_running_theme();
+
+        assert_ne!(style_by_name("path").fg, before);
+        assert_eq!(style_by_name("path").fg, Some(OVERRIDE_FG));
+        assert_eq!(
+            maki_color::Registry::style("path").and_then(|s| s.fg),
+            Some(color)
+        );
+    }
+
+    /// An override outlives a theme switch, which the API documents.
+    #[test]
+    fn an_override_survives_a_theme_switch() {
+        let _registry = maki_color::exclusive();
+        let _restore = ThemeRestore::new();
+        set(tokyonight());
+        let color = SegmentColor::parse(OVERRIDE_HEX).expect("hex parses");
         assert!(maki_color::Registry::set_override(
             "input_border",
-            None,
-            STYLE_NAMES
+            Some(color)
         ));
-        patch_running_theme();
+
         set(dracula());
+
+        assert_eq!(current().input_border.fg, Some(OVERRIDE_FG));
+    }
+
+    /// A derived style builds its `Style` from a `Theme` color, so it has no
+    /// foreground field to patch. It must be refused rather than reported as
+    /// applied.
+    #[test]
+    fn a_derived_style_is_not_settable() {
+        let _registry = maki_color::exclusive();
+        let _restore = ThemeRestore::new();
+        set(tokyonight());
+
+        assert!(!maki_color::Registry::set_override(
+            "background",
+            Some(SegmentColor::Default)
+        ));
     }
 
     const DRACULA_BG: Color = Color::Rgb(0x28, 0x2a, 0x36);
