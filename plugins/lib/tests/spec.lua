@@ -57,12 +57,29 @@ case("truncate_trailing_newlines_counted", function()
   assert(result:find("%[truncated"), "trailing newlines should count as lines")
 end)
 
-case("output_limits_tail_keeps_the_last_n_lines", function()
-  eq(output_limits.tail("a\nb\nc\nd", 2), "c\nd")
-  eq(output_limits.tail("a\nb\nc\nd", 1), "d")
-  eq(output_limits.tail("a\nb\nc", 3), "a\nb\nc", "fewer lines than asked stays whole")
-  eq(output_limits.tail("", 5), "")
-  eq(output_limits.tail("a\nb\n", 1), "", "a trailing newline is an empty last line")
+local function cut_middle(head, lines, bytes, tail)
+  return head .. "\n\n[truncated " .. lines .. " lines, " .. bytes .. " bytes]" .. (tail and "\n\n" .. tail or "")
+end
+
+case("cut_middle_within_limits_unchanged", function()
+  eq(output_limits.cut_middle("a\nb\nc", 3, 1000), "a\nb\nc")
+  eq(output_limits.cut_middle("a\nb\nc", nil, nil), "a\nb\nc")
+  eq(output_limits.cut_middle("", 1, 1), "")
+end)
+
+case("cut_middle_keeps_both_ends_on_line_limit", function()
+  eq(output_limits.cut_middle("a\nb\nc\nd\ne\nf", 4, 1000), cut_middle("a\nb", 2, 5, "e\nf"))
+  eq(output_limits.cut_middle("a\nb\nc\nd\ne", 3, 1000), cut_middle("a\nb", 2, 5, "e"), "the head gets the odd line")
+end)
+
+case("cut_middle_keeps_both_ends_on_byte_limit", function()
+  local text = "aaaa\nbbbb\ncccc\ndddd\neeee"
+  eq(output_limits.cut_middle(text, 1000, 10), cut_middle("aaaa", 3, 16, "eeee"))
+end)
+
+case("cut_middle_oversized_first_line_keeps_a_utf8_prefix", function()
+  eq(output_limits.cut_middle(string.rep("é", 10), 1000, 6), cut_middle("é", 0, 18))
+  eq(output_limits.cut_middle(string.rep("x", 20) .. "\nok", 1000, 10), cut_middle("xxxxx", 0, 16, "ok"))
 end)
 
 -- ToolView tests
@@ -1690,6 +1707,8 @@ end)
 
 local parse = require("maki.provider_parse")
 
+local NULL_AS_NIL = { luanil = { object = true, array = true } }
+
 local NUMBERS_JSON = [[{
   "int": 8192, "whole_float": 8192.0, "exp": 1e3, "frac": 1.5, "neg": -1,
   "null": null, "str": "8192", "bool": true,
@@ -1697,7 +1716,7 @@ local NUMBERS_JSON = [[{
 }]]
 
 case("provider_parse_as_u64_takes_whole_non_negative_numbers", function()
-  local doc = assert(maki.json.decode(NUMBERS_JSON))
+  local doc = assert(maki.json.decode(NUMBERS_JSON, NULL_AS_NIL))
   for key, expected in pairs({
     int = 8192,
     whole_float = 8192,
@@ -1716,7 +1735,7 @@ case("provider_parse_as_u64_takes_whole_non_negative_numbers", function()
 end)
 
 case("provider_parse_as_u32_rejects_past_u32_max", function()
-  local doc = assert(maki.json.decode(NUMBERS_JSON))
+  local doc = assert(maki.json.decode(NUMBERS_JSON, NULL_AS_NIL))
   eq(parse.as_u32(doc.u32_max), 4294967295)
   eq(parse.as_u32(doc.past_u32), nil)
   eq(parse.as_u32(doc.whole_float), 8192)
@@ -1724,7 +1743,7 @@ case("provider_parse_as_u32_rejects_past_u32_max", function()
 end)
 
 case("provider_parse_as_f64_and_as_bool_take_only_their_type", function()
-  local doc = assert(maki.json.decode(NUMBERS_JSON))
+  local doc = assert(maki.json.decode(NUMBERS_JSON, NULL_AS_NIL))
   eq(parse.as_f64(doc.frac), 1.5)
   eq(parse.as_f64(doc.neg), -1)
   eq(parse.as_f64(doc.str), nil)
@@ -1744,9 +1763,12 @@ case("provider_parse_pricing_needs_both_sides", function()
 end)
 
 case("provider_parse_models_keeps_the_first_row_per_id_sorted", function()
-  local body = assert(maki.json.decode([[{"data": [
+  local body = assert(maki.json.decode(
+    [[{"data": [
     {"id": "b", "n": 1}, {"id": "a"}, {"id": "b", "n": 2}, {"n": 3}, "stray"
-  ]}]]))
+  ]}]],
+    NULL_AS_NIL
+  ))
   local rows = parse.models(body, function(raw)
     if type(raw) == "table" and raw.id then
       return { id = raw.id, n = raw.n }

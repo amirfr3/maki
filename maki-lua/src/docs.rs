@@ -8,6 +8,8 @@
 //! everything for maki-docgen, and the drift test below asserts docs match
 //! the real `maki` global.
 
+use crate::plugin_permissions::Permission;
+
 pub struct ModuleDoc {
     /// Dotted path, e.g. "maki.base64". Classes use a type name, e.g.
     /// "maki.treesitter.Node".
@@ -35,10 +37,12 @@ pub struct FnDoc {
     pub returns: &'static str,
     /// Lua snippet rendered as a fenced code block, or "" when absent.
     pub example: &'static str,
-    /// Manifest key of the plugin permission gating this function, from the
-    /// `guard =` attribute. Rendered into the docs so the reference can
-    /// never drift from the actual gate.
-    pub guard: Option<&'static str>,
+    /// The plugin permissions gating this function, all of them required,
+    /// from the `guard =` attribute. Rendered into the docs so the reference
+    /// can never drift from the actual gate.
+    pub guard: Option<&'static [Permission]>,
+    /// A plain value such as `maki.NIL`, documented without a call signature.
+    pub value: bool,
 }
 
 pub struct ParamDoc {
@@ -56,6 +60,7 @@ pub fn api_docs() -> Vec<&'static ModuleDoc> {
         &api::pack::DOCS,
         &api::tool::DOCS,
         &api::autocmd::DOCS,
+        &api::action::DOCS,
         &api::plan::DOCS,
         &api::slot::DOCS,
         &api::agent::DOCS,
@@ -109,7 +114,7 @@ mod tests {
 
     use super::{DocKind, api_docs};
     use crate::api::{Owner, create_maki_global};
-    use crate::plugin_permissions::PluginPermissions;
+    use crate::plugin_permissions::{PluginPermissions, PluginReach};
     use maki_providers::plugin::DeclAuthority;
 
     fn resolve_table(maki: &Table, path: &str) -> Table {
@@ -151,9 +156,10 @@ mod tests {
             Owner {
                 name: Arc::from("docs-test"),
                 authority: DeclAuthority::ThirdParty,
+                granted_providers: Arc::from(Vec::new()),
             },
             Some(ui_tx),
-            &PluginPermissions::trusted(),
+            &PluginReach::new(PluginPermissions::trusted()),
             Arc::default(),
         )
         .unwrap();

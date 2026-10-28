@@ -7,7 +7,9 @@ use maki_providers::{Model, ModelTier, model_registry};
 use mlua::{Error as LuaError, Lua, Result as LuaResult, Table, Value};
 
 use crate::api::util::command::{ModelRequest, UiAction, ui_json_roundtrip};
+use crate::api::util::convert::TableExt;
 use crate::api::util::pair::{Pair, err_pair};
+use crate::plugin_permissions::PluginPermissions;
 
 const SET_ARG_ERR: &str = "expected a model spec string or an options table";
 
@@ -134,15 +136,25 @@ fn tier(lua: &Lua, name: String, provider: Option<String>) -> LuaResult<Pair<Tab
 /// `thinking` comes back in the spelling `set` accepts, so a table from here
 /// can go straight back in.
 ///
-/// `thinking_options` is every thinking value this model accepts, cheapest
-/// first: `{name, tokens?}` per row, where `tokens` is the budget maki would
-/// send for that row and is absent on `off` and `adaptive`. It is empty exactly
-/// when `supports_thinking` is false, so a picker can render the ladder from it
-/// without knowing the levels.
+/// `thinking_options` lists named thinking choices, cheapest first, as
+/// `{name, tokens?}` per row. Request paths that use named `thinking_fields`
+/// expose those levels without token counts. Toggle-only fields expose
+/// `adaptive` and, when allowed, `off`. Otherwise the generic budget ladder applies.
+/// `tokens` is absent on `off` and `adaptive` too. The list is empty exactly
+/// when `supports_thinking` is false.
+///
+/// `thinking` keeps the session's intent and delegation ceiling.
+/// `thinking_shown` names the effective row to highlight, including snapped
+/// effort levels and budgets sent as native levels or toggles. With declared
+/// fields, a budget stays numeric only where the adapter forwards the count.
+/// On the generic ladder, a model whose API has no adaptive mode leaves
+/// `adaptive` out and shows its fixed level.
+/// Declared effort fields keep `adaptive` separate because their fragments can
+/// differ from the provider fallback.
 ///
 /// @return (table|nil, string|nil) `{spec, id, provider, thinking,
-///   thinking_options, fast, supports_thinking, supports_fast}`, or nil and an
-///   error.
+///   thinking_shown, thinking_options, fast, supports_thinking,
+///   supports_fast}`, or nil and an error.
 /// @example
 /// local m = maki.model.get()
 /// if m.spec ~= "anthropic/claude-opus-4-6" then ... end
@@ -179,8 +191,8 @@ async fn available(lua: Lua, #[ctx] tx: Option<flume::Sender<UiAction>>) -> LuaR
 /// @example
 /// maki.model.set("anthropic/claude-opus-4-6")
 /// maki.model.set({ spec = "zai/glm-5", thinking = "high" })
-/// maki.keymap.set("n", "<M-t>", function() maki.model.set({ thinking = "" }) end)
-#[lua_fn]
+/// maki.keymap.set({ "n", "i" }, "<M-t>", function() maki.model.set({ thinking = "" }) end)
+#[lua_fn(guard = SessionSettings)]
 async fn set(
     lua: Lua,
     #[ctx] tx: Option<flume::Sender<UiAction>>,
@@ -193,9 +205,9 @@ async fn set(
             fast: None,
         },
         Value::Table(opts) => ModelRequest::Set {
-            spec: opts.get("spec")?,
-            thinking: opts.get("thinking")?,
-            fast: opts.get("fast")?,
+            spec: opts.opt("spec")?,
+            thinking: opts.opt("thinking")?,
+            fast: opts.opt("fast")?,
         },
         other => {
             return Err(LuaError::runtime(format!(
@@ -212,8 +224,11 @@ lua_table! {
     /// between your two go-to models, or lifts thinking for one hard question.
     /// Without an interactive UI every function returns
     /// `nil, "no interactive UI attached"`.
-    "maki.model" => pub(crate) fn create_model_table(tx: Option<flume::Sender<UiAction>>),
-    DOCS [get(tx), available(tx), set(tx), tier(), info()]
+    "maki.model" => pub(crate) fn create_model_table(
+        tx: Option<flume::Sender<UiAction>>,
+        perms: &PluginPermissions,
+    ),
+    DOCS [get(tx), available(tx), set(perms, tx), tier(), info()]
 }
 
 #[cfg(test)]
@@ -249,7 +264,7 @@ mod tests {
 
     fn lua_with_model(tx: Option<flume::Sender<UiAction>>) -> Lua {
         let lua = Lua::new();
-        let t = create_model_table(&lua, tx).unwrap();
+        let t = create_model_table(&lua, tx, &PluginPermissions::trusted()).unwrap();
         lua.globals().set("model", t).unwrap();
         lua
     }

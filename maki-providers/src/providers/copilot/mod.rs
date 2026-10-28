@@ -14,6 +14,7 @@ use super::anthropic::shared;
 use super::openai::responses;
 use super::openai_compat;
 use crate::model::{Model, ModelFamily, ModelInfo, ModelPricing, ModelTier, lookup_entry};
+use crate::model_registry;
 use crate::provider::{BoxFuture, Provider};
 use crate::providers::{ResolvedAuth, Timeouts};
 use crate::spec::{AuthDoc, Build, CatalogDoc, GeneratedDocs, LoginConfig, Native, ProviderSpec};
@@ -46,6 +47,8 @@ pub(crate) const SPEC: ProviderSpec = ProviderSpec {
     family: ModelFamily::Generic,
     supports_thinking: false,
     supports_deferred_tools: false,
+    adaptive_effort,
+    thinking_fields_fallback: |_| None,
     accepts_arbitrary_models: true,
     fallback_max_output: Some(100_000),
     fallback_context_window: 200_000,
@@ -87,7 +90,9 @@ fn create_with_auth(
 
 inventory::submit!(SPEC.config_row());
 const GRAPHQL_QUERY: &str = "query { viewer { copilotEndpoints { api } } }";
-const API_VERSION_HEADER: &str = "2025-10-01";
+/// Also pins the `/models` shape: `2025-10-01` leaves out `billing.token_prices`,
+/// and by `2026-07-01` its `cache_price` is called `cache_read_price`.
+const API_VERSION_HEADER: &str = "2026-08-01";
 const EDITOR_VERSION_HEADER: &str = concat!("Maki/", env!("CARGO_PKG_VERSION"));
 /// Without it the gateway falls back to the `copilot-language-server`
 /// integrator, which intermittently rejects newer models such as gpt-6-luna.
@@ -283,17 +288,15 @@ impl Copilot {
     ) -> Result<StreamResponse, AgentError> {
         let auth = self.auth().await?;
         let mut body = responses::build_body(model, messages, system, tools);
-        let reasoning_info = crate::model_registry::provider_info::<CopilotModelInfo>(
-            "copilot", &model.id,
-        )
-        .or_else(|| {
-            self.models
-                .lock()
-                .unwrap()
-                .get(&model.id)
-                .map(CopilotModel::reasoning_info)
-                .map(Arc::new)
-        });
+        let reasoning_info = model_registry::provider_info::<CopilotModelInfo>(SLUG, &model.id)
+            .or_else(|| {
+                self.models
+                    .lock()
+                    .unwrap()
+                    .get(&model.id)
+                    .map(CopilotModel::reasoning_info)
+                    .map(Arc::new)
+            });
         if let Some(info) = reasoning_info {
             responses::apply_responses_reasoning(
                 &mut body,
@@ -427,7 +430,9 @@ struct CopilotTokenPriceTier {
     #[serde(default)]
     output_price: f64,
     #[serde(default)]
-    cache_price: f64,
+    cache_read_price: f64,
+    cache_write_price: Option<f64>,
+    max_prompt_tokens: Option<u32>,
 }
 
 impl CopilotModel {
@@ -444,7 +449,7 @@ impl CopilotModel {
         let reasoning = self.reasoning_info();
         ModelInfo {
             id: self.id.clone(),
-            context_window: self.capabilities.limits.max_context_window_tokens,
+            context_window: self.context_window(),
             max_output_tokens: self.capabilities.limits.max_output_tokens,
             pricing: self.pricing(),
             supports_thinking: Some(self.supports_thinking()),
@@ -488,14 +493,29 @@ impl CopilotModel {
                 .any(|effort| effort == dialect::OFF),
             reasoning_efforts,
             adaptive_thinking: self.capabilities.supports.adaptive_thinking,
+            endpoint: self.endpoint(),
         }
     }
 
+    /// `max_context_window_tokens` spans the long-context tier where a model
+    /// has one; the default tier's window is its prompt cap plus the output.
+    fn context_window(&self) -> Option<u32> {
+        let limits = &self.capabilities.limits;
+        self.billing
+            .token_prices
+            .as_ref()
+            .and_then(|prices| prices.default.as_ref())
+            .and_then(|default| default.max_prompt_tokens)
+            .zip(limits.max_output_tokens)
+            .map(|(prompt, output)| prompt.saturating_add(output))
+            .or(limits.max_context_window_tokens)
+    }
+
     /// `/models` reports prices in AI credits per billing batch (1 credit =
-    /// $0.01), scaled to USD per 1M tokens for [`ModelPricing`]. The endpoint
-    /// exposes only the default context tier and cached-input reads; cache
-    /// writes are inherited from the static spec by id prefix so cost
-    /// accounting matches the offline path.
+    /// $0.01), scaled to USD per 1M tokens for [`ModelPricing`]. Only the
+    /// default context tier is read. A model without a cache write price
+    /// inherits it from the static spec by id prefix, so cost accounting
+    /// matches the offline path.
     fn pricing(&self) -> Option<ModelPricing> {
         let token_prices = self.billing.token_prices.as_ref()?;
         let default = token_prices.default.as_ref()?;
@@ -504,14 +524,19 @@ impl CopilotModel {
             return None;
         }
         let usd_per_million = AIC_TO_USD_PER_MILLION / batch_size;
-        let manifest_cache_write = lookup_entry(SPEC.models(), &self.id)
-            .and_then(|entry| entry.pricing.as_ref())
-            .map_or(0.0, |pricing| pricing.cache_write);
+        let cache_write = default.cache_write_price.map_or_else(
+            || {
+                lookup_entry(SPEC.models(), &self.id)
+                    .and_then(|entry| entry.pricing.as_ref())
+                    .map_or(0.0, |pricing| pricing.cache_write)
+            },
+            |price| price * usd_per_million,
+        );
         Some(ModelPricing::per_million(
             default.input_price * usd_per_million,
             default.output_price * usd_per_million,
-            manifest_cache_write,
-            default.cache_price * usd_per_million,
+            cache_write,
+            default.cache_read_price * usd_per_million,
         ))
     }
 
@@ -594,6 +619,7 @@ struct CopilotModelInfo {
     reasoning_efforts: Vec<Effort>,
     reasoning_off: bool,
     adaptive_thinking: bool,
+    endpoint: Endpoint,
 }
 
 #[derive(Deserialize)]
@@ -746,6 +772,7 @@ fn messages_body(
 
 fn effort_dialect(info: &CopilotModelInfo) -> EffortDialect<'_> {
     EffortDialect {
+        name: None,
         supported: if info.reasoning_efforts.is_empty() {
             dialect::PREFER_HIGH.supported
         } else {
@@ -754,6 +781,20 @@ fn effort_dialect(info: &CopilotModelInfo) -> EffortDialect<'_> {
         adaptive: (!info.adaptive_thinking).then_some(Effort::High),
         off: info.reasoning_off.then_some(dialect::OFF),
     }
+}
+
+fn adaptive_effort(model: &Model) -> Option<Effort> {
+    model_registry::provider_info::<CopilotModelInfo>(SLUG, &model.id)
+        .and_then(|info| listed_adaptive_effort(&info))
+}
+
+/// Only the responses endpoint renders `adaptive` through the dialect. The
+/// messages endpoint spells it natively and chat completions carries no
+/// reasoning at all.
+fn listed_adaptive_effort(info: &CopilotModelInfo) -> Option<Effort> {
+    (info.endpoint == Endpoint::Responses)
+        .then(|| effort_dialect(info).adaptive_effort())
+        .flatten()
 }
 
 fn guess_endpoint(model_id: &str) -> Endpoint {
@@ -838,6 +879,7 @@ mod tests {
     const OPUS_CACHE_WRITE: f64 = 6.25;
     const CLAUDE_SPEC: &str = "copilot/claude-opus-5";
     const REPLY: &str = "reply";
+    const SOL: &str = "gpt-6.1-sol";
 
     #[test]
     fn endpoint_prefers_messages_then_responses_then_chat() {
@@ -949,6 +991,27 @@ mod tests {
         assert_eq!(model.model_info().tier, None);
     }
 
+    /// On the responses endpoint `adaptive` is the dialect's level, snapped to
+    /// what the model lists. The Claude models report `adaptive_thinking` and
+    /// take the messages endpoint, which spells the mode natively.
+    #[test_case(RESPONSES_PATH, json!({"reasoning_effort": ["low", "high", "max"]}), Some(Effort::High); "responses sends a fixed level")]
+    #[test_case(RESPONSES_PATH, json!({"reasoning_effort": ["low", "medium"]}), Some(Effort::Medium); "the level snaps to what the model lists")]
+    #[test_case(RESPONSES_PATH, json!({"reasoning_effort": ["low", "high"], "adaptive_thinking": true}), None; "reported adaptive stays")]
+    #[test_case(MESSAGES_PATH, json!({"max_thinking_budget": 32_000}), None; "messages spells it natively")]
+    fn adaptive_effort_follows_the_endpoint_and_the_listing(
+        endpoint: &str,
+        supports: Value,
+        expected: Option<Effort>,
+    ) {
+        let listed: CopilotModel = serde_json::from_value(json!({
+            "id": SOL,
+            "supported_endpoints": [endpoint],
+            "capabilities": {"type": "chat", "supports": supports}
+        }))
+        .unwrap();
+        assert_eq!(listed_adaptive_effort(&listed.reasoning_info()), expected);
+    }
+
     #[test_case(RESPONSES_PATH, true; "responses honors reasoning")]
     #[test_case(MESSAGES_PATH, true; "messages honors thinking")]
     #[test_case(CHAT_COMPLETIONS_PATH, false; "chat completions drops reasoning")]
@@ -1006,11 +1069,11 @@ mod tests {
     #[test]
     fn token_prices_convert_aic_per_batch_to_usd_per_million() {
         let model: CopilotModel = serde_json::from_value(json!({
-            "id": "gpt-5",
+            "id": "claude-opus-5",
             "billing": {
                 "token_prices": {
                     "batch_size": 500_000,
-                    "default": {"input_price": 500.0, "output_price": 3000.0, "cache_price": 50.0}
+                    "default": {"input_price": 500.0, "output_price": 3000.0, "cache_read_price": 50.0, "cache_write_price": 62.5}
                 }
             }
         }))
@@ -1020,7 +1083,20 @@ mod tests {
         assert_eq!(pricing.input, 10.0);
         assert_eq!(pricing.output, 60.0);
         assert_eq!(pricing.cache_read, 1.0);
+        assert_eq!(pricing.cache_write, 1.25);
         assert!(pricing.fast.is_none());
+    }
+
+    #[test_case(json!({"max_context_window_tokens": 1_000_000, "max_output_tokens": 128_000}), json!({"batch_size": 1_000_000, "default": {"max_prompt_tokens": 200_000}}) => Some(328_000) ; "default_tier")]
+    #[test_case(json!({"max_context_window_tokens": 200_000, "max_output_tokens": 64_000}), Value::Null => Some(200_000) ; "no_tiers")]
+    fn context_window_is_the_default_tier(limits: Value, token_prices: Value) -> Option<u32> {
+        let model: CopilotModel = serde_json::from_value(json!({
+            "id": "claude-opus-5.5",
+            "capabilities": {"type": "chat", "limits": limits},
+            "billing": {"token_prices": token_prices}
+        }))
+        .unwrap();
+        model.model_info().context_window
     }
 
     #[test]
@@ -1031,7 +1107,7 @@ mod tests {
                 "billing": {
                     "token_prices": {
                         "batch_size": 500_000,
-                        "default": {"input_price": 250.0, "output_price": 1250.0, "cache_price": 25.0}
+                        "default": {"input_price": 250.0, "output_price": 1250.0, "cache_read_price": 25.0}
                     }
                 }
             })
@@ -1065,7 +1141,7 @@ mod tests {
     }
 
     #[test_case(json!({"id": "gpt-5"}) ; "no billing")]
-    #[test_case(json!({"id": "gpt-5", "billing": {"token_prices": {"batch_size": 0, "default": {"input_price": 1.0, "output_price": 1.0, "cache_price": 0.1}}}}) ; "zero batch size")]
+    #[test_case(json!({"id": "gpt-5", "billing": {"token_prices": {"batch_size": 0, "default": {"input_price": 1.0, "output_price": 1.0, "cache_read_price": 0.1}}}}) ; "zero batch size")]
     fn pricing_falls_back_when_billing_unusable(billing: Value) {
         let model: CopilotModel = serde_json::from_value(billing).unwrap();
         assert!(model.pricing().is_none());
@@ -1079,6 +1155,7 @@ mod tests {
             reasoning_efforts: vec![Effort::Low, Effort::Medium, Effort::High],
             reasoning_off: true,
             adaptive_thinking: false,
+            endpoint: Endpoint::Responses,
         };
         let dialect = effort_dialect(&info);
 

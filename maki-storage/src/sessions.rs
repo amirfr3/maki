@@ -31,7 +31,16 @@ use crate::lock::{Lock, LockError};
 use crate::{StateDir, StorageError, atomic_write, now_epoch, plans};
 
 const SESSION_VERSION: u32 = 1;
-const LOG_FORMAT_VERSION: u32 = 2;
+/// 3: messages write `kind` as a bare tag with `facts` beside it, records a
+/// v2 reader would skip. Bump it only when an older build would lose data
+/// reading the new shape. Additive changes (new fields, new block types) need
+/// no bump.
+const LOG_FORMAT_VERSION: u32 = 3;
+/// v2 only nests `kind` differently, and messages still read that.
+const OLDEST_LOG_FORMAT_VERSION: u32 = 2;
+/// The refusal is all a user who rolled back across a format bump gets, so
+/// it says which way to go and which format it found.
+const NEWER_LOG_FORMAT: &str = "written by a newer maki, log format";
 pub const SESSIONS_DIR: &str = "sessions";
 const CWD_INDEX_FILE: &str = "cwd_latest.json";
 const CWD_INDEX_STEM: &str = "cwd_latest";
@@ -86,6 +95,12 @@ pub enum SessionError {
     Storage(#[from] StorageError),
     #[error("incompatible session version {found} (expected {expected})")]
     VersionMismatch { found: u32, expected: u32 },
+    #[error(
+        "session log {newer} {found}; this build reads up to {latest}",
+        newer = NEWER_LOG_FORMAT,
+        latest = LOG_FORMAT_VERSION
+    )]
+    NewerLogFormat { found: u32 },
     #[error("session ID mismatch: log owns {log_id}, got {given_id}")]
     IdMismatch { log_id: MakiId, given_id: MakiId },
     #[error("session log {path} has header id {raw_id:?} that is not a valid id: {source}")]
@@ -209,6 +224,14 @@ impl SessionClaim {
             warn!(error = %e, session_id = %id, "fresh session left unprotected");
             Self::new(id, sessions_dir, None)
         })
+    }
+
+    /// Whether a writer holds `id` right now. Unlike [`Self::acquire`] it
+    /// never waits and never takes the claim, so a reader asking is never
+    /// slowed down and never gets in a writer's way.
+    pub fn is_held(id: MakiId, dir: &StateDir) -> bool {
+        let path = lock_path(&dir.path().join(SESSIONS_DIR), id);
+        matches!(Lock::acquire_shared(&path), Err(LockError::Held { .. }))
     }
 
     pub fn id(&self) -> MakiId {
@@ -355,6 +378,10 @@ pub struct SessionMeta {
     pub context_size: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_draft: Option<String>,
+    /// The plugins that changed `input_draft`, `None` when none did. Enter
+    /// weighs them before it runs the draft as a command or a shell line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_draft_writers: Option<StoredWriters>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub queued_messages: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -466,6 +493,22 @@ pub struct SessionSummary {
 pub enum StoredEffect {
     Allow,
     Deny,
+}
+
+/// What the plugins that wrote a draft held, kept only as far as a reload
+/// can vouch for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StoredWriters {
+    /// Each of them could send a prompt, which takes `agent` and
+    /// `session_write`, like the sender of a turn a rewind or a fork brought
+    /// back.
+    Agent,
+    /// Their grants were lost, so they hold nothing. A value from a newer
+    /// maki lands here too, so it costs the draft its writers and not the
+    /// whole meta line.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -670,8 +713,15 @@ pub trait TitleSource {
 
 /// A pasted code block bakes `\n` into a title and skews width-based padding
 /// in single-line UI like the picker, so every title entry point calls this.
+/// Titles reach terminals as they are (`maki session list`), and an imported
+/// one may hold anything, so control characters split words too. An ESC or
+/// BEL left in could write the clipboard (OSC 52) or fake a link.
 pub fn normalize_title(title: &str) -> String {
-    title.split_whitespace().collect::<Vec<_>>().join(" ")
+    title
+        .split(|c: char| c.is_whitespace() || c.is_control())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub fn generate_title<M: TitleSource>(messages: &[M]) -> String {
@@ -1244,6 +1294,22 @@ enum RawTag {
     Other,
 }
 
+/// A newer log is refused whole rather than read record by record: the
+/// records this build cannot parse would be skipped, and its next rewrite
+/// would make that loss permanent.
+fn check_log_format(v: u32) -> Result<(), SessionError> {
+    if v > LOG_FORMAT_VERSION {
+        return Err(SessionError::NewerLogFormat { found: v });
+    }
+    if v < OLDEST_LOG_FORMAT_VERSION {
+        return Err(SessionError::VersionMismatch {
+            found: v,
+            expected: LOG_FORMAT_VERSION,
+        });
+    }
+    Ok(())
+}
+
 fn load_jsonl<M, U, T>(data: &[u8], display_path: &str) -> Result<Session<M, U, T>, SessionError>
 where
     M: DeserializeOwned,
@@ -1303,12 +1369,7 @@ where
                 cwd: h_cwd,
                 created_at: h_created,
             } => {
-                if v != LOG_FORMAT_VERSION {
-                    return Err(SessionError::VersionMismatch {
-                        found: v,
-                        expected: LOG_FORMAT_VERSION,
-                    });
-                }
+                check_log_format(v)?;
                 id = Some(h_id);
                 model = h_model;
                 cwd = h_cwd;
@@ -1633,9 +1694,7 @@ fn scan_jsonl_header(path: &Path) -> Option<ScannedHeader> {
         reader.read_line(&mut line).ok()?;
         serde_json::from_str(line.trim_end()).ok()?
     };
-    if header.v != LOG_FORMAT_VERSION {
-        return None;
-    }
+    check_log_format(header.v).ok()?;
 
     let (title, updated_at) =
         read_last_meta(&mut file).unwrap_or_else(|| (DEFAULT_TITLE.to_string(), 0));
@@ -1794,6 +1853,12 @@ where
     }
 
     pub fn messages(&self) -> &[M] {
+        &self.messages
+    }
+
+    /// The transcript itself rather than a copy, for a reader that keeps it
+    /// past the borrow.
+    pub fn shared_messages(&self) -> &Arc<Vec<M>> {
         &self.messages
     }
 
@@ -2295,8 +2360,9 @@ mod tests {
         next_epoch, update_cwd_index, write_full_session,
     };
     use super::{
-        HistorySnapshot, SCAN_CACHE_FILE, Session, SessionClaim, SessionError, SessionLog,
-        SessionMeta, StorageError, TitleSource,
+        HistorySnapshot, LOG_FORMAT_VERSION, NEWER_LOG_FORMAT, OLDEST_LOG_FORMAT_VERSION,
+        SCAN_CACHE_FILE, Session, SessionClaim, SessionError, SessionLog, SessionMeta,
+        StorageError, StoredWriters, TitleSource, check_log_format,
     };
     use crate::StateDir;
     use crate::frame::PromptFacts;
@@ -2764,18 +2830,18 @@ mod tests {
     }
 
     fn frame_with_system(system: &str) -> StoredFrame {
-        StoredFrame {
-            system: system.into(),
-            fingerprint: "hash".into(),
-            facts: Some(PromptFacts {
+        StoredFrame::new(
+            system.into(),
+            "hash".into(),
+            Some(PromptFacts {
                 date: "2026-10-02".into(),
                 cwd: "/project".into(),
                 model: "m".into(),
                 instructions: " \n".into(),
                 hints: BTreeMap::from([("memory/tags".into(), "rust, cache".into())]),
             }),
-            mcp_tools: Vec::new(),
-        }
+            Vec::new(),
+        )
     }
 
     /// The agent sets a frame, or grows it with late MCP tools, without adding
@@ -3434,6 +3500,7 @@ mod tests {
         ; "long_truncates_at_word"
     )]
     #[test_case("one\n\ntwo\t three", "one two three" ; "whitespace_collapses")]
+    #[test_case("a\u{1b}]52;c;eA==\u{7}b\u{9b}c", "a ]52;c;eA== b c" ; "control_characters_never_reach_a_terminal")]
     fn title_extraction(input: &str, expected: &str) {
         let messages: Vec<Value> = if input.is_empty() {
             vec![]
@@ -3979,12 +4046,13 @@ mod tests {
     }
 
     #[test]
-    fn load_wrong_version_jsonl_returns_error() {
+    fn load_newer_version_jsonl_names_the_format() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
+        let found = LOG_FORMAT_VERSION + 1;
         let bad_header = serde_json::json!({
             "t": "header",
-            "v": 999,
+            "v": found,
             "id": "01965087-4c71-7f00-8000-000000000000",
             "model": "m",
             "cwd": "/tmp",
@@ -3995,10 +4063,20 @@ mod tests {
         fs::write(&path, format!("{}\n", bad_header)).unwrap();
 
         let err = TestSession::load_from(id, dir).unwrap_err();
-        assert!(matches!(
-            err,
-            SessionError::VersionMismatch { found: 999, .. }
-        ));
+        assert!(matches!(err, SessionError::NewerLogFormat { found: f } if f == found));
+        let message = err.to_string();
+        assert!(
+            message.contains(&format!("{NEWER_LOG_FORMAT} {found}")),
+            "{message}"
+        );
+    }
+
+    #[test_case(OLDEST_LOG_FORMAT_VERSION, true      ; "oldest_still_read")]
+    #[test_case(LOG_FORMAT_VERSION, true             ; "current_read")]
+    #[test_case(OLDEST_LOG_FORMAT_VERSION - 1, false ; "older_than_oldest_refused")]
+    #[test_case(LOG_FORMAT_VERSION + 1, false        ; "newer_refused")]
+    fn log_format_versions_this_build_reads(v: u32, readable: bool) {
+        assert_eq!(check_log_format(v).is_ok(), readable);
     }
 
     #[test_case(StoredThinking::Off ; "off")]
@@ -4323,12 +4401,12 @@ mod tests {
             }
             5 => session.replace_messages(vec![user_message(&format!("fresh-{step}"))]),
             6 => session.prune_orphans(tool_ids),
-            7 => session.set_frame(Some(Arc::new(StoredFrame {
-                system: format!("system-{step}"),
-                fingerprint: format!("hash-{step}"),
-                facts: Default::default(),
-                mcp_tools: Vec::new(),
-            }))),
+            7 => session.set_frame(Some(Arc::new(StoredFrame::new(
+                format!("system-{step}"),
+                format!("hash-{step}"),
+                Default::default(),
+                Vec::new(),
+            )))),
             8 => session.set_frame(None),
             _ => {
                 session.set_title(format!("title-{step}"));
@@ -4449,6 +4527,19 @@ mod tests {
 
         session.push_message(user_message("hello"));
         assert!(session.content_revision() > content);
+    }
+
+    /// A writer kind only a newer maki knows must not lose this one the meta
+    /// line it sits in.
+    #[test_case("agent", StoredWriters::Agent ; "known")]
+    #[test_case("from_the_future", StoredWriters::Unknown ; "from_a_newer_maki")]
+    fn draft_writers_load(stored: &str, loaded: StoredWriters) {
+        let mut meta = serde_json::to_value(SessionMeta::default()).unwrap();
+        meta["input_draft_writers"] = json!(stored);
+
+        let meta: SessionMeta = serde_json::from_value(meta).unwrap();
+
+        assert_eq!(meta.input_draft_writers, Some(loaded));
     }
 
     /// A mutator called with the value already there is not a change, and a

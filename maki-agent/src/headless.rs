@@ -24,7 +24,7 @@ use crate::tools::{FileAccess, LocalTools, RequestTools, ToolAudience, ToolRegis
 use crate::types::EventSender;
 use crate::{
     Agent, AgentConfig, AgentEvent, AgentInput, AgentMode, AgentParams, EventStreamGuard,
-    ImageSource, InputSource, McpHandle, McpSession, PermissionsConfig, RunLedger, SessionEvents,
+    ImageSource, InputSource, McpHandle, McpSession, PermissionsConfig, SessionEvents,
     SessionMailbox, ToolDeferral, ToolOutputLines, event_stream,
 };
 
@@ -164,7 +164,7 @@ pub fn spawn(params: HeadlessParams) -> (HeadlessHandle, SessionEvents) {
     let working_dir = params.initial_wd.to_string_lossy().into_owned();
     let mode = AgentMode::Build;
     let vars = template::env_vars();
-    let instructions = agent::load_instructions(&vars.apply("{cwd}"));
+    let instructions = agent::load_instructions(&vars.apply("{cwd}"), &params.config.instructions);
     let prompt_slots = Arc::new(params.prompt_slots);
     let spec = ContextSpec::new(
         vars,
@@ -205,9 +205,16 @@ pub fn spawn(params: HeadlessParams) -> (HeadlessHandle, SessionEvents) {
         );
 
         let error_tx = event_tx.clone();
+        let input = AgentInput::from_defaults(
+            params.prompt,
+            mode,
+            params.images,
+            defaults,
+            InputSource::Headless,
+        );
         // Outlives `agent`, so dropping it writes the transcript once the agent
         // that produced it is gone, without this body saying so.
-        let mut turn = track.turn(model.spec());
+        let mut turn = track.turn(model.spec(), &input);
         let mut agent = Agent::new(
             AgentParams {
                 provider,
@@ -228,25 +235,17 @@ pub fn spawn(params: HeadlessParams) -> (HeadlessHandle, SessionEvents) {
                 file_access: FileAccess::fresh(),
                 prompt_slots: Arc::clone(&prompt_slots),
                 subagent_cancels: Arc::new(CancelMap::new()),
-                ledger: Arc::new(RunLedger::default()),
+                ledger: turn.ledger(),
                 registry: Arc::clone(ToolRegistry::global_arc()),
                 audience: ToolAudience::MAIN,
                 model_policy: Arc::clone(&params.model_policy),
             },
             turn.run_params(event_tx, context),
         )
-        .with_loaded_instructions(instructions.loaded)
+        .with_loaded_instructions(instructions.loaded, instructions.files)
         .with_mcp(mcp);
 
-        let result = agent
-            .run(AgentInput::from_defaults(
-                params.prompt,
-                mode,
-                params.images,
-                defaults,
-                InputSource::Headless,
-            ))
-            .await;
+        let result = agent.run(input).await;
         drop(agent);
 
         if let Err(e) = result {
@@ -306,7 +305,7 @@ pub struct InteractiveHandle {
 
 pub fn spawn_interactive(params: InteractiveParams) -> (InteractiveHandle, SessionEvents) {
     let vars = template::env_vars();
-    let instructions = agent::load_instructions(&vars.apply("{cwd}"));
+    let instructions = agent::load_instructions(&vars.apply("{cwd}"), &params.config.instructions);
     let spec = ContextSpec {
         system_override: params.system_prompt_override,
         append_system: params.append_system_prompt,
@@ -402,7 +401,7 @@ pub fn spawn_interactive(params: InteractiveParams) -> (InteractiveHandle, Sessi
 
             // Outlives `agent`, so this turn is on disk before the next prompt
             // is read, without the loop body remembering to write it.
-            let mut turn = track.turn(model.spec());
+            let mut turn = track.turn(model.spec(), &input);
             let mut agent = Agent::new(
                 AgentParams {
                     provider: Arc::clone(&provider),
@@ -418,14 +417,14 @@ pub fn spawn_interactive(params: InteractiveParams) -> (InteractiveHandle, Sessi
                     file_access: Arc::clone(&file_access),
                     prompt_slots: Arc::clone(&params.prompt_slots),
                     subagent_cancels: Arc::new(CancelMap::new()),
-                    ledger: Arc::new(RunLedger::default()),
+                    ledger: turn.ledger(),
                     registry: Arc::clone(ToolRegistry::global_arc()),
                     audience: ToolAudience::MAIN,
                     model_policy: Arc::clone(&params.model_policy),
                 },
                 turn.run_params(event_tx, Arc::clone(&context)),
             )
-            .with_loaded_instructions(instructions.loaded.clone())
+            .with_loaded_instructions(instructions.loaded.clone(), instructions.files.clone())
             .with_user_response_rx(Arc::clone(&answer_rx))
             .with_cancel(cancel)
             .with_local_tools(Arc::clone(&params.local_tools))

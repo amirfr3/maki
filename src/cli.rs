@@ -41,7 +41,7 @@ pub struct Cli {
     #[arg(long = "image", value_name = "PATH")]
     pub images: Vec<PathBuf>,
 
-    /// Model spec (provider/model-id). Defaults to last used model, or claude-opus-4-6
+    /// Model spec (provider/model-id). Defaults to last used model, then configured default_model, then auto-detected
     #[arg(short, long)]
     pub model: Option<String>,
 
@@ -318,6 +318,18 @@ pub enum SessionAction {
         /// Skip the confirmation prompt
         #[arg(short, long)]
         force: bool,
+    },
+    /// Write a session as a portable JSON transcript to stdout
+    Export {
+        /// Session ID (see `maki session list`)
+        #[arg(value_name = "SESSION_ID")]
+        session_id: String,
+    },
+    /// Store a JSON transcript as a new session in this directory and print its ID
+    Import {
+        /// Transcript file, or stdin when omitted or `-`
+        #[arg(value_name = "FILE")]
+        file: Option<PathBuf>,
     },
 }
 

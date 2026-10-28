@@ -34,8 +34,8 @@ Maki is an AI coding agent (like Claude Code and opencode), that is built bottom
 
 Cheapest first, and scope to the crate you touched while iterating:
 
-- `just check` (or `cargo check -p <crate> --tests`)
-- `just lint` - `cargo clippy --all --tests -- -D warnings`
+- `just check` (or `cargo check -p <crate> --all-targets`)
+- `just lint` - `cargo clippy --all --all-targets --features maki-ui/bench -- -D warnings`
 - `just test` - `cargo nextest run --workspace`
 
 Read `justfile` for more.
@@ -62,6 +62,8 @@ Rust workspace, key crates in root dir:
 Built-in lua plugins in ./plugins: index (return a compact skeleton of a source file using tree-sitter), bash, glob, question, skill, memory, webfetch, websearch, todo_write, read, write, edit, task, code_execution (python sandbox), batch.
 
 Invariant: requests are append-only. Never rebuild `system`/`tools` or edit earlier messages mid-session: it voids the prompt cache everywhere and invalidates (or 400s) Anthropic thinking blocks bound to the prefix. Use a context update (`context_update` in `maki-agent/src/agent/frame.rs`) or an announced new frame. Contract tests: `assert_append_only` in `maki-agent/src/agent/run.rs`.
+
+Invariant: the serde of `Message`, `ContentBlock`, `FactsUpdate` and `PromptFacts` is public API (session files, `maki session export`, Lua). Fields are only added, with defaults. Variants are only added. Content an older build must not lose goes in a new `ContentBlock` variant, never a field. Only `ContentBlock` keeps a variant it does not know, so a new variant of any other enum in them (`Role`, `MessageKind`, `PlanChange`) needs a `LOG_FORMAT_VERSION` bump, or an older build drops the whole message.
 
 ## Docs
 

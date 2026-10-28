@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crossterm::event::{KeyCode, KeyEvent};
 use maki_agent::command::CustomCommand;
 use maki_agent::{McpPromptInfo, McpSnapshotReader};
-use maki_lua::{LuaCommandInfo, LuaCommandReader, Missing, Permission, PluginReach};
+use maki_lua::{LuaCommandInfo, LuaCommandReader, Missing, Permission, PluginReach, SENDS_PROMPT};
 use nucleo::pattern::{CaseMatching, Normalization};
 use nucleo::{Config, Matcher, Nucleo, Utf32String};
 use ratatui::Frame;
@@ -13,32 +13,51 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 
+use crate::components::input::{COMMAND_PREFIX, sent_text};
 use crate::text_buffer::TextBuffer;
 use crate::theme;
 
 const TICK_TIMEOUT_MS: u64 = 10;
 pub(crate) const USER_ONLY_SUFFIX: &str = " can only be run by you";
-pub const STARTS_TURNS: PluginAccess = PluginAccess::Needs(Permission::Agent);
+const STARTS_TURNS: PluginAccess = PluginAccess::Needs(&[Permission::Agent]);
+/// A prompt starts a turn and adds to the transcript, like `maki.session.prompt`.
+pub const SUBMITS_PROMPT: PluginAccess = PluginAccess::Needs(PROMPT_NEEDS);
+pub(crate) const PROMPT_NEEDS: &[Permission] = SENDS_PROMPT;
+const WRITES_SESSION: PluginAccess = PluginAccess::Needs(&[Permission::SessionWrite]);
+const CHANGES_SETTINGS: PluginAccess = PluginAccess::Needs(&[Permission::SessionSettings]);
 
 /// What a plugin must hold to run a command through `maki.api.run_command`.
 /// Typing a command is the user saying yes, so none of this applies there.
 ///
 /// Mirror the guard on the Lua API that does the same thing: looser is a side
 /// door around it, stricter only sends plugins to the API instead. That is why
-/// `/fast` is open, since `maki.model.set` is.
+/// `/model` and `/fast` need `session_settings`, as `maki.model.set` does.
+/// So do `/cd` and `/workflow`: no API mirrors them, but they change where the
+/// session's tools run and which tools it has.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PluginAccess {
+    /// Only what changes the view, never how a session runs or what it holds.
     Open,
-    Needs(Permission),
+    /// Every one of them.
+    Needs(&'static [Permission]),
     /// These move a security boundary: what runs without asking, which config
     /// loads, which code is installed. No grant unlocks them.
     UserOnly,
 }
 
-/// Named, because the plugin is often an alias whose author never thought
-/// about what its target reaches.
-pub(crate) fn missing_refusal(command: &str, missing: &Missing) -> String {
-    format!("{command}: {missing}")
+impl PluginAccess {
+    /// Why {caller} may not do {what}, or `None` when it may. Every refusal a
+    /// plugin gets for something the user could have typed reads this way.
+    pub(crate) fn refusal(self, what: &str, caller: &PluginReach) -> Option<String> {
+        match self {
+            Self::Open => None,
+            Self::Needs(needed) => needed
+                .iter()
+                .find(|&&perm| !caller.is_allowed(perm))
+                .map(|&perm| Missing::Permission(perm).refusal(what)),
+            Self::UserOnly => Some(format!("{what}{USER_ONLY_SUFFIX}")),
+        }
+    }
 }
 
 pub struct BuiltinCommand {
@@ -57,21 +76,21 @@ pub const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         description: "Summarize and compact conversation history (optional guidance)",
         max_args: usize::MAX,
         bang: false,
-        plugin_access: STARTS_TURNS,
+        plugin_access: SUBMITS_PROMPT,
     },
     BuiltinCommand {
         name: "/new",
         description: "Start a new session",
         max_args: 0,
         bang: false,
-        plugin_access: PluginAccess::Open,
+        plugin_access: WRITES_SESSION,
     },
     BuiltinCommand {
         name: "/fork",
         description: "Fork this session and switch to the copy",
         max_args: 0,
         bang: false,
-        plugin_access: PluginAccess::Open,
+        plugin_access: WRITES_SESSION,
     },
     BuiltinCommand {
         name: "/help",
@@ -99,7 +118,7 @@ pub const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         description: "Switch model",
         max_args: 0,
         bang: false,
-        plugin_access: PluginAccess::Open,
+        plugin_access: CHANGES_SETTINGS,
     },
     BuiltinCommand {
         name: "/theme",
@@ -127,7 +146,7 @@ pub const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         description: "Change working directory",
         max_args: 1,
         bang: false,
-        plugin_access: PluginAccess::Open,
+        plugin_access: CHANGES_SETTINGS,
     },
     BuiltinCommand {
         name: "/btw",
@@ -148,14 +167,14 @@ pub const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         description: "Toggle fast mode (Anthropic Opus or Codex subscription models)",
         max_args: 0,
         bang: false,
-        plugin_access: PluginAccess::Open,
+        plugin_access: CHANGES_SETTINGS,
     },
     BuiltinCommand {
         name: "/workflow",
         description: "Toggle workflow mode (task callable inside code_execution)",
         max_args: 0,
         bang: false,
-        plugin_access: PluginAccess::Open,
+        plugin_access: CHANGES_SETTINGS,
     },
     BuiltinCommand {
         name: "/exit",
@@ -357,7 +376,7 @@ impl CommandPalette {
                 self.close();
                 CommandAction::Consumed
             }
-            KeyCode::Enter => match self.confirm(&input.value()) {
+            KeyCode::Enter => match self.confirm(input.value()) {
                 Some(cmd) => {
                     self.close();
                     CommandAction::Execute(cmd)
@@ -382,6 +401,14 @@ impl CommandPalette {
         }
     }
 
+    /// The command Enter would run on {input}, looked up before it does.
+    pub fn enter_target(&mut self, input: &TextBuffer) -> Option<String> {
+        if !self.is_active(input) {
+            return None;
+        }
+        self.filtered.get(self.selected).map(|m| self.item_name(m))
+    }
+
     pub fn is_active(&mut self, input: &TextBuffer) -> bool {
         self.follow(input);
         self.is_open()
@@ -391,13 +418,22 @@ impl CommandPalette {
         !self.filtered.is_empty()
     }
 
+    /// `sync` always leaves a row picked, so a test that wants an Enter the
+    /// palette swallows has to catch up with {input} and take the pick away
+    /// by hand.
+    #[cfg(test)]
+    pub(crate) fn unselect(&mut self, input: &TextBuffer) {
+        self.follow(input);
+        self.selected = self.filtered.len();
+    }
+
     /// The box keeps one buffer for life and its version only climbs, so a
     /// version we have seen means text we already matched.
     fn follow(&mut self, input: &TextBuffer) {
         let version = Some(input.version());
         if self.synced_version != version {
             self.synced_version = version;
-            self.sync(&input.value());
+            self.sync(input.value());
         }
     }
 
@@ -412,7 +448,7 @@ impl CommandPalette {
             self.lua_commands = lua_snap.commands.clone();
             self.nucleo = Self::build_nucleo(&self.custom, &self.mcp_prompts, &self.lua_commands);
         }
-        let Some(stripped) = input.strip_prefix('/') else {
+        let Some(stripped) = sent_text(input).strip_prefix(COMMAND_PREFIX) else {
             self.filtered.clear();
             self.current_arg_count = 0;
             self.current_bang = false;
@@ -425,13 +461,9 @@ impl CommandPalette {
             .strip_suffix('!')
             .map_or((raw_word, false), |word| (word, true));
         self.current_bang = bang;
-        let trailing_space = stripped.ends_with(char::is_whitespace);
-
-        self.current_arg_count = if trailing_space {
-            parts.len()
-        } else {
-            parts.len().saturating_sub(1)
-        };
+        // Read off the trimmed text, so a space after the last word is no
+        // argument yet and the palette stays on the command Enter would run.
+        self.current_arg_count = parts.len().saturating_sub(1);
 
         self.nucleo.pattern.reparse(
             0,
@@ -589,7 +621,7 @@ impl CommandPalette {
     fn confirm(&self, input: &str) -> Option<ParsedCommand> {
         let item = self.filtered.get(self.selected)?;
         let name = self.item_name(item);
-        let args = input
+        let args = sent_text(input)
             .strip_prefix('/')
             .and_then(|s| s.split_once(char::is_whitespace))
             .map(|(_, a)| a.trim())
@@ -624,19 +656,14 @@ impl CommandPalette {
     fn plugin_refusal(&self, item: &CommandItem, caller: &PluginReach) -> Option<String> {
         let access = match item.command_type {
             CommandType::Builtin(cmd) => cmd.plugin_access,
-            CommandType::Custom(_) | CommandType::McpPrompt(_) => STARTS_TURNS,
+            CommandType::Custom(_) | CommandType::McpPrompt(_) => SUBMITS_PROMPT,
             CommandType::Lua(i) => {
                 return caller
                     .first_missing(&self.lua_commands[i].reach)
-                    .map(|missing| missing_refusal(&item.name, &missing));
+                    .map(|missing| missing.refusal(&item.name));
             }
         };
-        match access {
-            PluginAccess::Open => None,
-            PluginAccess::Needs(perm) => (!caller.is_allowed(perm))
-                .then(|| missing_refusal(&item.name, &Missing::Permission(perm))),
-            PluginAccess::UserOnly => Some(format!("{}{USER_ONLY_SUFFIX}", item.name)),
-        }
+        access.refusal(&item.name, caller)
     }
 
     pub fn find_custom_command(&self, display_name: &str) -> Option<&CustomCommand> {
@@ -823,6 +850,24 @@ mod tests {
         ])
     }
 
+    /// A builtin is open to plugins only when it neither reads nor changes a
+    /// session's content or settings: it opens host UI the user then drives,
+    /// or acts on the process. A new builtin lands outside this list, so
+    /// opening one is a decision someone writes down here, never a default.
+    const OPEN_TO_PLUGINS: &[&str] = &[
+        "/help", "/usage", "/queue", "/theme", "/mcp", "/login", "/exit", "/reload",
+    ];
+
+    #[test]
+    fn only_commands_that_never_touch_a_session_are_open_to_plugins() {
+        let open: Vec<&str> = BUILTIN_COMMANDS
+            .iter()
+            .filter(|cmd| cmd.plugin_access == PluginAccess::Open)
+            .map(|cmd| cmd.name)
+            .collect();
+        assert_eq!(open, OPEN_TO_PLUGINS);
+    }
+
     #[test]
     fn slash_shows_builtins_plus_extras() {
         let builtin_count = synced("/").filtered.len();
@@ -890,12 +935,15 @@ mod tests {
         assert_eq!(name, "/cd");
     }
 
-    #[test_case("/help ", false     ; "zero_arg_help_with_space")]
+    #[test_case("/help ", true      ; "zero_arg_help_with_space")]
+    #[test_case(" /help", true      ; "zero_arg_help_after_a_space")]
+    #[test_case("/help me", false   ; "zero_arg_help_with_an_arg")]
     #[test_case("/compact ", true   ; "compact_stays_active_with_space")]
     #[test_case("/cd ", true        ; "one_arg_cmd_with_space")]
     #[test_case("/cd ~/foo", true   ; "one_arg_cmd_mid_arg")]
     #[test_case("/cd  ~/foo", true  ; "one_arg_cmd_double_space")]
-    #[test_case("/cd ~/foo ", false ; "one_arg_cmd_second_space")]
+    #[test_case("/cd ~/foo ", true  ; "one_arg_cmd_second_space")]
+    #[test_case("/cd ~/foo bar", false ; "one_arg_cmd_two_args")]
     #[test_case("/btw hello world", true ; "btw_stays_active_with_many_args")]
     fn sync_respects_nargs(input: &str, expect_active: bool) {
         let p = synced(input);
@@ -909,8 +957,8 @@ mod tests {
     }
 
     #[test]
-    fn custom_command_without_args_hides_on_space() {
-        let p = synced_with_custom("/user:fix ", sample_custom());
+    fn custom_command_without_args_hides_on_an_arg() {
+        let p = synced_with_custom("/user:fix now", sample_custom());
         assert!(!p.is_open());
     }
 
@@ -1000,8 +1048,8 @@ mod tests {
     }
 
     #[test]
-    fn mcp_prompt_without_args_hides_on_space() {
-        let p = synced_with_prompts("/myserver:summarize ");
+    fn mcp_prompt_without_args_hides_on_an_arg() {
+        let p = synced_with_prompts("/myserver:summarize now");
         assert!(
             !p.filtered
                 .iter()
@@ -1297,10 +1345,10 @@ mod tests {
         p.handle_key(key(KeyCode::Esc), &input);
         assert!(!p.is_active(&input));
 
-        input.set_value("/hel".into());
+        input.set_value("/hel");
         assert!(p.is_active(&input));
 
-        input.set_value("hello".into());
+        input.set_value("hello");
         assert!(!p.is_active(&input));
     }
 

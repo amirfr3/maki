@@ -131,6 +131,25 @@ That `web/AGENTS.md` is not dead weight. The first time the agent `read`s a file
 
 Put coding conventions, repo quirks, and off-limits directories in these files. Keep them short; the next section explains why.
 
+### Your own file list
+
+The table above is the default. `instructions.files` in the global `~/.config/maki/init.lua` replaces it, and `instructions.overrides` narrows it per checkout. Both are personal settings, so a project `init.lua` cannot set them:
+
+```lua
+maki.setup({
+    -- Only load CLAUDE.md, wherever it exists:
+    instructions = {
+        files = { "CLAUDE.md" },
+        -- Except in this checkout, where no project file loads at all:
+        overrides = {
+            { remote = "github.com/example/*", files = {} },
+        },
+    },
+})
+```
+
+An empty `files` list skips every project instruction file, and `AGENTS.local.md` still loads. An `overrides` entry matches by `path` (a glob against the project root) or by `remote` (a glob against the project's git remotes, normalized to `host/path`); an entry with neither matches every project. The first matching entry wins, and one that sets no `files` still ends the search. See [configuration](/docs/configuration/#instructions).
+
 ## Four places to put knowledge
 
 All four end up in context, but at different times and prices:
@@ -197,5 +216,23 @@ maki -r <session-id>
 ```
 
 `MAKI_DISABLE_AUTOCOMPACT=1` turns off the automatic compaction. A manual `/compact` still compacts.
+
+## Background tasks
+
+By default the [`task`](/docs/tools/#task) tool waits for its subagent. Turn on `allow_background` and the model gets a `background` input:
+
+```lua
+maki.setup({
+    plugins = {
+        task = { allow_background = true },
+    },
+})
+```
+
+With `background = true` the tool answers right away and the parent keeps working. To wait, the parent ends its turn. When the subagent is done, its result arrives as a notice that wakes the parent. Structured output and the partial output of an interrupted run come back the same way.
+
+To stop a task, open `/tasks`, select it, and press Ctrl+S. The parent still gets the result on its next turn, but the notice does not wake it.
+
+Background and blocking tasks share `plugins.task.max_concurrent`. A background task cannot ask for permission, so its tools need [allow rules](/docs/permissions/) or YOLO. Plan mode still blocks its file writes. Closing the chat or reloading plugins stops the chat's background tasks. Headless, SDK, and ACP runs have no live chat to deliver to, so there the call blocks as usual.
 
 Related: [Token Economy](/docs/token-economy/) for why all this frugality exists, [Configuration](/docs/configuration/) for the knobs.

@@ -32,7 +32,8 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 smol = { workspace = true }
 tempfile = { workspace = true }
-isahc = { workspace = true }
+reqwest = { workspace = true }
+async-compat = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 flume = { workspace = true }
@@ -67,7 +68,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.6.4"
+version = "0.6.5"
 edition = "2024"
 authors = ["Tony Solomonik <tony.solomonik@gmail.com>"]
 license = "MIT"
@@ -125,7 +126,7 @@ unicode-width = "0.2"
 unicode-segmentation = "1"
 similar = { version = "3", features = ["inline", "unicode"] }
 jsonrepair = { version = "0.1", default-features = false, features = ["serde"] }
-jsonschema = { version = "0.58", default-features = false }
+jsonschema = { version = "0.59", default-features = false }
 jiff = { version = "0.2", default-features = false, features = ["std", "tz-system"] }
 keyring = "4"
 arboard = { version = "3", default-features = false, features = ["image-data"] }
@@ -143,9 +144,16 @@ event-listener = "5"
 futures-lite = "2"
 futures = "0.3"
 isahc = { version = "2.0", default-features = false, features = ["text-decoding", "static-curl", "rustls-tls", "http2"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+async-compat = "0.2"
+opentelemetry = { version = "0.33", default-features = false, features = ["metrics", "logs"] }
+opentelemetry_sdk = { version = "0.33", default-features = false, features = ["metrics", "logs"] }
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["metrics", "logs", "grpc-tonic", "gzip-tonic", "tls-aws-lc", "tls-roots", "http-proto", "http-json", "gzip-http", "reqwest-blocking-client", "reqwest-rustls", "internal-logs"] }
+opentelemetry-proto = { version = "0.33", default-features = false, features = ["gen-tonic-messages", "with-serde", "metrics", "logs"] }
+http = "1"
+percent-encoding = "2"
 futures-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs"] }
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs"] }
-flate2 = "1"
 libc = "0.2"
 windows-sys = { version = "0.61", features = ["Win32_Globalization"] }
 nucleo = "0.5"
@@ -172,7 +180,7 @@ tree-sitter-kotlin-ng = "1.1"
 tree-sitter-lua = "0.5"
 tree-sitter-md = "0.5"
 tree-sitter-nix = "0.3.0"
-tree-sitter-php = "0.24"
+tree-sitter-php = "0.25"
 tree-sitter-python = "0.25"
 tree-sitter-ruby = "0.23"
 tree-sitter-rust = "0.24"
@@ -191,8 +199,8 @@ tree-sitter-css = "0.25"
 tree-sitter-hcl = "1.1"
 tree-sitter-json = "0.24"
 tree-sitter-make = "1.1"
-monty = { git = "https://github.com/pydantic/monty.git", tag = "v0.0.23", package = "monty" }
-monty-types = { git = "https://github.com/pydantic/monty.git", tag = "v0.0.23", package = "monty-types" }
+monty = "1"
+monty-types = "1"
 notify = { version = "9.0.0-rc.5", default-features = false, features = ["flume", "macos_fsevent"] }
 notify-rust = "4.18.1"
 serde_yaml = "0.9"

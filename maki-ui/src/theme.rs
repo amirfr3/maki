@@ -253,6 +253,10 @@ pub static BUNDLED_THEMES: &[ThemeEntry] = &[
         toml: include_str!("themes/solarized_light.toml"),
     },
     ThemeEntry {
+        name: "system",
+        toml: include_str!("themes/system.toml"),
+    },
+    ThemeEntry {
         name: "tokyonight",
         toml: include_str!("themes/tokyonight.toml"),
     },
@@ -441,6 +445,7 @@ named_styles!(t => {
     "background" => Style::new().bg(t.background),
     "foreground" => Style::new().fg(t.foreground),
     "accent" => t.accent,
+    "shell_prefix" => t.shell_prefix,
     "active" => t.active,
     "keybind_key" => t.keybind_key,
     "keybind_desc" => t.keybind_desc,
@@ -1095,6 +1100,18 @@ mod tests {
         assert_eq!(t.code_gutter.fg, Some(Color::Rgb(0xff, 0xb8, 0x6c)));
         assert_eq!(t.list_marker.fg, Some(Color::Rgb(0x8b, 0xe9, 0xfd)));
         assert_eq!(t.bold.fg, Some(Color::Rgb(0xff, 0xb8, 0x6c)));
+    }
+
+    #[test]
+    fn system_theme_keeps_colors_symbolic() {
+        let t = load_by_name("system").expect("system theme must exist");
+        assert_eq!(t.background, Color::Reset);
+        assert_eq!(t.foreground, Color::Reset);
+        assert_eq!(t.user.fg, Some(Color::Cyan));
+        assert_eq!(
+            t.syntax.settings.background,
+            Some(SegmentColor::Default.to_syntect())
+        );
     }
 
     #[test]

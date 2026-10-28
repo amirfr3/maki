@@ -8,12 +8,12 @@ use std::sync::{Arc, Mutex};
 use agent_client_protocol_schema::v1::{
     AgentNotification, AgentRequest, AgentResponse, ConfigOptionUpdate, ContentBlock,
     CurrentModeUpdate, EmbeddedResourceResource, Error as AcpError, ImageContent,
-    InitializeRequest, JsonRpcMessage, LoadSessionRequest, McpServer, NewSessionRequest,
-    Notification, PromptRequest, PromptResponse, Request, RequestId, RequestPermissionRequest,
-    RequestPermissionResponse, Response, SessionConfigOptionValue, SessionId, SessionModeId,
-    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse, StopReason,
-    TextContent,
+    InitializeRequest, JsonRpcMessage, ListSessionsRequest, ListSessionsResponse,
+    LoadSessionRequest, McpServer, NewSessionRequest, Notification, PromptRequest, PromptResponse,
+    Request, RequestId, RequestPermissionRequest, RequestPermissionResponse, Response,
+    SessionConfigOptionValue, SessionId, SessionInfo, SessionModeId, SessionNotification,
+    SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
+    SetSessionModeRequest, SetSessionModeResponse, StopReason, TextContent,
 };
 use color_eyre::eyre::Context;
 use flume::{Sender, WeakSender};
@@ -265,6 +265,7 @@ async fn handle_request(
         }
         "session/new" => new_session(srv, raw, params).await,
         "session/load" => load_session(srv, raw, params).await,
+        "session/list" => list_sessions(raw, &params.storage).await,
         "session/prompt" => match handle_prompt(srv, raw, &id) {
             Ok(()) => return,
             Err(e) => Err(e),
@@ -383,6 +384,52 @@ async fn load_session(
     let resp = methods::load_session_response()
         .config_options(vec![methods::model_config_option(&spec, &srv.model_specs)]);
     Ok(AgentResponse::LoadSessionResponse(resp))
+}
+
+/// `session/list`: stored sessions, newest first. Reads the store, not
+/// the live session, so it works before any session is open. The
+/// optional cwd filters by exact match against the stored cwd, like the
+/// CLI and TUI pickers: a path spelled differently (symlink, trailing
+/// slash) matches nothing. Without a cwd all stored sessions are
+/// listed, like `maki session list --global`. `cursor` is ignored; the
+/// response is a single page.
+async fn list_sessions(raw: &Value, storage: &StateDir) -> Result<AgentResponse, AcpError> {
+    let req: ListSessionsRequest = parse_params(raw)?;
+    // The scan stats every session file and tail-reads those with a cold
+    // cache, so it runs on a blocking thread, like the TUI picker.
+    let storage = storage.clone();
+    let summaries = smol::unblock(move || match req.cwd {
+        Some(cwd) => StoredSession::list(&cwd.to_string_lossy(), &storage),
+        None => StoredSession::list_all(&storage),
+    })
+    .await
+    .map_err(|e| AcpError::internal_error().data(json_str(&e)))?;
+    let sessions = summaries
+        .into_iter()
+        .map(|s| {
+            let info = SessionInfo::new(s.id.to_string(), s.cwd).title(s.title);
+            match iso_from_epoch(s.updated_at) {
+                Some(ts) => info.updated_at(ts),
+                None => info,
+            }
+        })
+        .collect();
+    Ok(AgentResponse::ListSessionsResponse(
+        ListSessionsResponse::new(sessions),
+    ))
+}
+
+/// Maki stores epoch seconds; ACP requires an ISO 8601 string. The
+/// store writes 0 when a transcript's tail meta could not be read,
+/// meaning "unknown", which must not be rendered as 1970-01-01.
+fn iso_from_epoch(secs: u64) -> Option<String> {
+    if secs == 0 {
+        return None;
+    }
+    let secs = i64::try_from(secs).ok()?;
+    jiff::Timestamp::from_second(secs)
+        .ok()
+        .map(|t| t.to_string())
 }
 
 /// Spawns a session and installs it as the server's current one. Spawning
@@ -993,6 +1040,9 @@ fn start_event_pump(
                 AgentEvent::ToolOutput { id, content } => translate::tool_output(&id, &content),
                 AgentEvent::ToolDone(event) => translate::tool_done(&event, &cwd, home.as_deref()),
                 AgentEvent::TurnComplete(event) => translate::usage_update(&event, cost_total),
+                AgentEvent::ObservationLine { text } => {
+                    translate::notice(&MakiId::generate().to_string(), &text)
+                }
                 AgentEvent::Done { reason, .. } => {
                     tool_inputs.clear();
                     if let Some(id) = finish_turn(&pending) {
@@ -1424,6 +1474,9 @@ mod tests {
 
     const PUMP_CWD: &str = "/project";
     const QUEUED_TEXT: &str = "queued before close";
+    const NOTICE_LINE: &str = "Background agent finished: find auth";
+    const CHILD_NOTICE_LINE: &str = "a child's own notice";
+    const HOST_NOTICE: &str = "the prompt changed, so the cache starts over";
     const PROMPT_ID: i64 = 7;
     const SUBAGENT_COST: f64 = 0.25;
     const TURN_COST: f64 = 0.5;
@@ -1767,6 +1820,65 @@ mod tests {
         assert!(pending(&srv).lock().unwrap().prompt.is_none());
     }
 
+    /// An accepted observation's line arrives as a finished card, in the order
+    /// the agent sent it, and the turn's permission and answer routing stay as
+    /// they were. A host notice is not sent, and a child's line stays in the
+    /// child, like the rest of its stream.
+    #[test]
+    fn an_accepted_notice_reaches_the_client_in_stream_order() {
+        let (srv, .., out_rx) = test_server();
+        pending(&srv).lock().unwrap().prompt = Some(RequestId::Number(PROMPT_ID));
+        run_pump(&srv, None, |sender| {
+            sender
+                .send(AgentEvent::ObservationLine {
+                    text: NOTICE_LINE.to_owned(),
+                })
+                .unwrap();
+            sender
+                .send(AgentEvent::Notice {
+                    text: HOST_NOTICE.to_owned(),
+                })
+                .unwrap();
+            sender
+                .send_envelope(Envelope {
+                    event: AgentEvent::ObservationLine {
+                        text: CHILD_NOTICE_LINE.to_owned(),
+                    },
+                    subagent: Some(subagent(None)),
+                    run_id: 0,
+                })
+                .unwrap();
+            sender
+                .send(AgentEvent::TextDelta {
+                    text: QUEUED_TEXT.to_owned(),
+                })
+                .unwrap();
+            sender.send(write_tool_start(PARENT_TOOL_USE_ID)).unwrap();
+            sender.send(permission_request(PARENT_TOOL_USE_ID)).unwrap();
+            sender.send(done_event()).unwrap();
+        });
+
+        let wire: Vec<Value> = out_rx.try_iter().collect();
+        let text = serde_json::to_value(translate::text_delta(QUEUED_TEXT)).unwrap();
+        assert_eq!(wire.len(), 5, "{wire:?}");
+        let card = &wire[0]["params"]["update"];
+        assert_eq!(card["sessionUpdate"], "tool_call");
+        assert_eq!(card["title"], NOTICE_LINE);
+        assert_eq!(card["status"], "completed");
+        assert_eq!(wire[1]["params"]["update"], text);
+        assert_eq!(
+            wire[2]["params"]["update"]["sessionUpdate"],
+            "tool_call_update"
+        );
+        assert_eq!(wire[3]["method"], "session/request_permission");
+        assert_eq!(
+            wire[3]["params"]["toolCall"]["title"],
+            MAIN_PERMISSION_TITLE
+        );
+        assert_eq!(wire[4]["id"], PROMPT_ID);
+        assert_eq!(wire[4]["result"]["stopReason"], "end_turn");
+    }
+
     /// Clients only prompt a login on `auth_required`, so a rejected credential
     /// must not come back as a generic failure.
     #[test_case(true, AcpError::auth_required() ; "auth_error_asks_for_a_login")]
@@ -2016,6 +2128,94 @@ mod tests {
         assert!(out_rx.is_empty(), "a batch adding nothing is not announced");
     }
 
+    /// Editor clients call `session/list` to offer resuming a session. The
+    /// response must contain only the requested project's stored sessions,
+    /// with the fields the picker renders (title, ISO 8601 updated_at).
+    #[test]
+    fn list_sessions_returns_stored_sessions_for_their_cwd() {
+        use std::str::FromStr as _;
+        let tmp = TempDir::new().unwrap();
+        let dir = StateDir::from_path(tmp.path().to_path_buf());
+        let mut here: Session<Message, TokenUsage, maki_agent::ToolOutput> =
+            Session::new(SELECTED_SPEC, "/project");
+        here.replace_messages(vec![Message::user("keep".into())]);
+        here.save(&SessionClaim::acquire(here.id, &dir).unwrap(), &dir)
+            .unwrap();
+        let mut elsewhere: Session<Message, TokenUsage, maki_agent::ToolOutput> =
+            Session::new(SELECTED_SPEC, "/other");
+        elsewhere.replace_messages(vec![Message::user("away".into())]);
+        elsewhere
+            .save(&SessionClaim::acquire(elsewhere.id, &dir).unwrap(), &dir)
+            .unwrap();
+
+        let raw = serde_json::json!({ "params": { "cwd": "/project" } });
+        let AgentResponse::ListSessionsResponse(list) =
+            smol::block_on(list_sessions(&raw, &dir)).unwrap()
+        else {
+            panic!("session/list must answer ListSessionsResponse");
+        };
+        let json = serde_json::to_string(&list).unwrap();
+        assert!(json.contains(&here.id.to_string()), "{json}");
+        assert!(!json.contains(&elsewhere.id.to_string()), "{json}");
+        assert_eq!(list.sessions.len(), 1);
+        assert_eq!(list.sessions[0].title.as_deref(), Some("New session"));
+        // Any u64 formats to some string; parsing is the real check.
+        let ts = list.sessions[0]
+            .updated_at
+            .clone()
+            .expect("a saved session has an updated_at");
+        assert!(jiff::Timestamp::from_str(&ts).is_ok(), "{ts}");
+    }
+
+    /// `session/list` must work with no live session. An omitted cwd
+    /// applies no filter: sessions of every project are listed.
+    #[test]
+    fn session_list_dispatches_with_no_session_and_no_cwd() {
+        let tmp = TempDir::new().unwrap();
+        let storage = StateDir::from_path(tmp.path().to_path_buf());
+        let cwd = std::env::current_dir().unwrap();
+        let mut session: Session<Message, TokenUsage, maki_agent::ToolOutput> =
+            Session::new(SELECTED_SPEC, &cwd.to_string_lossy());
+        session.replace_messages(vec![Message::user("here".into())]);
+        session
+            .save(
+                &SessionClaim::acquire(session.id, &storage).unwrap(),
+                &storage,
+            )
+            .unwrap();
+        let mut foreign: Session<Message, TokenUsage, maki_agent::ToolOutput> =
+            Session::new(SELECTED_SPEC, "/somewhere-else");
+        foreign.replace_messages(vec![Message::user("there".into())]);
+        foreign
+            .save(
+                &SessionClaim::acquire(foreign.id, &storage).unwrap(),
+                &storage,
+            )
+            .unwrap();
+
+        let (mut srv, _answer_rx, out_rx) = test_server();
+        srv.session = None;
+        let params = acp_params(storage);
+        let raw = serde_json::json!({ "params": {} });
+        smol::block_on(handle_request(
+            &mut srv,
+            "session/list",
+            RequestId::Number(7),
+            &raw,
+            &params,
+        ));
+        let resp = out_rx.recv().unwrap();
+        let resp = resp.to_string();
+        assert!(
+            resp.contains(&session.id.to_string()),
+            "session/list with no cwd must include the process cwd's session: {resp}"
+        );
+        assert!(
+            resp.contains(&foreign.id.to_string()),
+            "an omitted cwd applies no filter, so other projects are listed: {resp}"
+        );
+    }
+
     #[test]
     fn load_history_round_trips_stored_messages() {
         let tmp = TempDir::new().unwrap();
@@ -2176,5 +2376,18 @@ mod tests {
             stdio.environment.get("TOKEN").map(String::as_str),
             Some("t")
         );
+    }
+}
+
+#[cfg(test)]
+mod iso_tests {
+    use super::iso_from_epoch;
+    use test_case::test_case;
+
+    #[test_case(0, None ; "unknown_sentinel_is_no_timestamp")]
+    #[test_case(1_700_000_000, Some("2023-11-14T22:13:20Z") ; "epoch_seconds_to_utc")]
+    #[test_case(u64::MAX, None ; "out_of_range_drops_the_timestamp")]
+    fn iso_from_epoch_converts(secs: u64, expected: Option<&str>) {
+        assert_eq!(iso_from_epoch(secs).as_deref(), expected);
     }
 }

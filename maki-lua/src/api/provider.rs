@@ -7,12 +7,9 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use maki_agent::cancel::CancelToken;
-use maki_config::providers::ProvidersConfig;
 use maki_lua_macro::{lua_fn, lua_table};
 use maki_providers::AgentError;
-use maki_providers::plugin::{
-    self, DeclAuthority, Hook, ProviderDecl, ProviderHooks, Registration,
-};
+use maki_providers::plugin::{self, Hook, ProviderDecl, ProviderHooks, Registration};
 use maki_providers::provider::BoxFuture;
 use maki_storage::StateDir;
 use maki_storage::auth::{
@@ -26,8 +23,9 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+use crate::api::Owner;
 use crate::api::net::{self, NetError, ResponseData};
-use crate::api::util::convert::{json_to_lua, lua_to_json, lua_to_json_within};
+use crate::api::util::convert::{TableExt, json_to_lua, lua_to_json, lua_to_json_within};
 use crate::api::util::pair::{Pair, try_pair};
 use crate::plugin_permissions::{NetEgress, OwnedSlugs, Permission, PluginPermissions};
 use crate::runtime::{DeferredCallback, Request, host_senders};
@@ -201,6 +199,7 @@ impl Drop for LuaHookKeys {
                 delay: Duration::ZERO,
                 plugin: Arc::clone(&self.plugin),
                 cancel: Arc::new(AtomicBool::new(true)),
+                ceiling: None,
             });
         }
     }
@@ -527,7 +526,7 @@ fn add_stdio(lua: &Lua, ctx: &Table) -> LuaResult<()> {
         "prompt",
         lua.create_async_function(|_, opts: Table| async move {
             let label: String = opts.get("label").unwrap_or_default();
-            let secret = opts.get::<Option<bool>>("secret")?.unwrap_or(false);
+            let secret = opts.opt::<bool>("secret")?.unwrap_or(false);
             Ok(smol::unblock(move || read_answer(&label, secret)).await)
         })?,
     )?;
@@ -608,17 +607,16 @@ fn owned(slugs: &OwnedSlugs, slug: &str) -> LuaResult<()> {
     )))
 }
 
-/// Whether providers.toml selects this package to implement {slug}. A package
-/// that ships several providers calls it at load time to skip the ones the user
-/// did not [select](/docs/providers/#select-a-provider-package).
+/// Whether this package was granted {slug}: the manifest lists it under
+/// `providers` and the install approval covers it. Kept from maki 0.6.3,
+/// where multi-provider packages called it to skip the ones the user did not
+/// select; it now answers from the same list.
 ///
 /// @param slug string Provider name.
 /// @return boolean
 #[lua_fn]
-fn is_selected(_lua: &Lua, #[ctx] plugin: Arc<str>, slug: String) -> LuaResult<bool> {
-    Ok(ProvidersConfig::load_or_default()
-        .get(&slug)
-        .is_some_and(|def| def.plugin.as_deref() == Some(plugin.as_ref())))
+fn is_selected(_lua: &Lua, #[ctx] owner: crate::api::Owner, slug: String) -> LuaResult<bool> {
+    Ok(owner.granted_providers.contains(&slug))
 }
 
 /// Register a provider this plugin implements. Its models are addressed as
@@ -628,6 +626,12 @@ fn is_selected(_lua: &Lua, #[ctx] plugin: Arc<str>, slug: String) -> LuaResult<b
 /// while the plugin loads. The plugin needs a non-empty `net_hosts` list in its
 /// `plugin.toml`. The [Providers guide](/docs/providers/#plugin-providers)
 /// walks through a full example.
+///
+/// A slug models.dev serves has to be one the package was granted: the
+/// manifest lists it under `providers`, and the install approval covers it.
+/// List every slug the package registers, so a name the catalog adds later
+/// is already approved. A slug maki ships is reserved. See
+/// [granted slugs](/docs/providers/#granted-slugs).
 ///
 /// Set exactly one of `codec` or `base`. An unknown key, or an option the
 /// chosen codec cannot honour, fails registration.
@@ -706,8 +710,8 @@ fn is_selected(_lua: &Lua, #[ctx] plugin: Arc<str>, slug: String) -> LuaResult<b
 ///       `dialect` (string) Required. One of `"standard"`, `"codex"`,
 ///               `"codex-5-1"`, `"coding-plan"`, `"gpt-5-6"`, `"gpt-6"`,
 ///               `"prefer-high"`, `"high-only"`, `"glm"`, `"deepseek"`,
-///               `"anthropic-adaptive"`, `"tensorx"`, `"grok"` or
-///               `"ollama"`.
+///               `"anthropic-adaptive"`, `"gemini"`, `"tensorx"`, `"grok"`
+///               or `"ollama"`.
 ///       `field` (string) Body path for the effort. Dots nest, e.g.
 ///               `"reasoning.effort"`. Defaults to `reasoning_effort`.
 ///       `requires_support` (boolean) Send effort only to models that
@@ -780,14 +784,18 @@ fn is_selected(_lua: &Lua, #[ctx] plugin: Arc<str>, slug: String) -> LuaResult<b
 #[lua_fn(guard = Net)]
 fn register(
     lua: &Lua,
-    #[ctx] plugin: Arc<str>,
+    #[ctx] owner: crate::api::Owner,
     #[ctx] egress: NetEgress,
-    #[ctx] authority: DeclAuthority,
-    #[ctx] reads_env: bool,
+    #[ctx] grants: PluginPermissions,
     spec: Table,
 ) -> LuaResult<()> {
+    let crate::api::Owner {
+        name: plugin,
+        authority,
+        granted_providers: granted,
+    } = owner;
     let (hook_keys, mut decl) = declaration(lua, &spec)?;
-    if decl.api_key_env.is_some() && !reads_env {
+    if decl.api_key_env.is_some() && !grants.now(lua).is_allowed(Permission::Env) {
         return Err(register_error(API_KEY_ENV_NEEDS_ENV));
     }
     decl.net_hosts = egress
@@ -822,6 +830,7 @@ fn register(
             },
         },
         authority,
+        &granted,
     )
     .map_err(|e| mlua::Error::runtime(e.to_string()))?;
     egress.owns(slug);
@@ -900,7 +909,7 @@ fn http_error(_lua: &Lua, res: Table) -> LuaResult<ProviderError> {
     let status: u16 = res.get(STATUS_FIELD).map_err(malformed)?;
     let body: String = res.get(BODY_FIELD).map_err(malformed)?;
     let headers: HashMap<String, String> = res
-        .get::<Option<HashMap<String, String>>>(HEADERS)
+        .opt::<HashMap<String, String>>(HEADERS)
         .map_err(malformed)?
         .unwrap_or_default()
         .into_iter()
@@ -1044,9 +1053,9 @@ lua_table! {
     ///   models = { { prefixes = { "acme-large" }, tier = "strong" } },
     /// })
     /// ```
-    "maki.provider" => pub(crate) fn create_provider_table(perms: &PluginPermissions, plugin: Arc<str>, egress: NetEgress, authority: DeclAuthority, reads_env: bool), DOCS [
-        register(perms, plugin, egress, authority, reads_env),
-        is_selected(plugin),
+    "maki.provider" => pub(crate) fn create_provider_table(perms: &PluginPermissions, owner: crate::api::Owner, egress: NetEgress, grants: PluginPermissions), DOCS [
+        register(perms, owner, egress, grants),
+        is_selected(owner),
         http_error,
     ]
 }
@@ -1058,13 +1067,11 @@ lua_table! {
 pub(crate) fn create_provider_namespace(
     lua: &Lua,
     permissions: &PluginPermissions,
-    plugin: Arc<str>,
+    owner: Owner,
     egress: NetEgress,
-    authority: DeclAuthority,
 ) -> LuaResult<Table> {
     let owned = egress.owned();
-    let reads_env = permissions.is_allowed(Permission::Env);
-    let provider = create_provider_table(lua, permissions, plugin, egress, authority, reads_env)?;
+    let provider = create_provider_table(lua, permissions, owner, egress, permissions.clone())?;
     provider.set("auth", create_auth_table(lua, owned)?)?;
     Ok(provider)
 }
@@ -1072,6 +1079,7 @@ pub(crate) fn create_provider_namespace(
 #[cfg(test)]
 mod tests {
     use maki_providers::ProviderUsage;
+    use maki_providers::plugin::DeclAuthority;
     use serde_json::json;
     use test_case::test_case;
 
@@ -1470,16 +1478,22 @@ mod tests {
     }
 
     /// A Lua state with the real `maki.provider` table as the global
-    /// `provider`.
+    /// `provider`. The slug under test is granted, which a refusal test
+    /// overrides to cover.
     fn provider_lua(reads_env: bool) -> Lua {
         let lua = Lua::new();
+        let mut grants = PluginPermissions::trusted();
+        grants.set(Permission::Env, reads_env);
         let table = create_provider_table(
             &lua,
             &PluginPermissions::trusted(),
-            Arc::from(PLUGIN),
+            crate::api::Owner {
+                name: Arc::from(PLUGIN),
+                authority: DeclAuthority::ThirdParty,
+                granted_providers: Arc::from(vec![SLUG_NAME.to_owned()]),
+            },
             NetEgress::default(),
-            DeclAuthority::ThirdParty,
-            reads_env,
+            grants,
         )
         .unwrap();
         lua.globals().set("provider", table).unwrap();

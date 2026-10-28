@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -10,8 +10,10 @@ use serde_json::{Value, json};
 use tracing::{debug, error, warn};
 
 use crate::agent::CallInstructions;
-use crate::mcp::{McpSession, TOOL_SEARCH_TOOL_NAME, ToolDeferral, UNKNOWN_MCP, is_wire_name};
-use crate::permissions::{LayerAnswer, PromptLayers};
+use crate::mcp::{
+    McpSession, TOOL_SEARCH_TOOL_NAME, ToolDeferral, UNKNOWN_MCP, internal_tool_name, is_wire_name,
+};
+use crate::permissions::{LayerAnswer, PermissionCheck, PromptLayers};
 use crate::task_set::TaskSet;
 use crate::tools::hook::{Authority, HookCall, HookStage, OUTPUT_IS_ERROR, OUTPUT_TEXT, Verdict};
 use crate::tools::registry::{BoxFuture, InstalledHook, RegisteredTool, Tool, ToolInvocation};
@@ -35,6 +37,8 @@ const UNKNOWN_TOOL_PREFIX: &str = "unknown tool";
 const MCP_SERVER_GONE: &str =
     "Its MCP server is not connected or no longer offers it, so it cannot be called now.";
 const MCP_PERM_SCOPE_MAX_BYTES: usize = 200;
+const MCP_SUMMARY_PREFIX: &str = "mcp: ";
+const SEARCH_QUERY_FIELD: &str = "query";
 
 const SOURCE_NATIVE: &str = "native";
 const SOURCE_LOCAL: &str = "local";
@@ -671,36 +675,10 @@ async fn run_native_tool(
     // what "the same file" means.
     let mutated = invocation.mutable_path().map(FileKey::new);
 
-    if let Some(key) = &mutated {
-        if let Some(chat) = ctx.background_for
-            && let Some(reason) = AgentSeed::background_write_block(chat)
-        {
-            warn!(
-                tool = %name,
-                %chat,
-                target = %key.as_path().display(),
-                reason = %reason,
-                "blocked background write"
-            );
-            return done_error(reason);
-        }
-        let is_plan_target = ctx
-            .mode
-            .plan_path()
-            .is_some_and(|plan| FileKey::new(plan) == *key);
-        if !is_plan_target {
-            if ctx.mode.plan_path().is_some() {
-                warn!(
-                    tool = %name,
-                    target = %key.as_path().display(),
-                    "blocked write in plan mode"
-                );
-                return done_error(crate::tools::PLAN_WRITE_RESTRICTED.into());
-            }
-            if let Some(reason) = ctx.permissions.boundary_block_reason(key.as_path()) {
-                return done_error(reason);
-            }
-        }
+    if let Some(key) = &mutated
+        && let Some(reason) = mutation_block(ctx, name, key)
+    {
+        return done_error(reason);
     }
 
     let header_result = invocation.start_header().await;
@@ -789,6 +767,53 @@ async fn run_native_tool(
     }
 }
 
+/// Header summary and body format of a call the registry cannot describe
+/// (`tool_search`, MCP). Dispatch draws the standalone call from it and
+/// `maki.api.get_tool` hands it to Lua, so a batch child looks the same.
+#[derive(Debug)]
+pub struct RoutedView {
+    pub summary: String,
+    pub markdown: bool,
+}
+
+impl RoutedView {
+    fn tool_search(input: &Value) -> Self {
+        Self {
+            summary: search_query(input).to_owned(),
+            markdown: true,
+        }
+    }
+
+    fn mcp(qualified: &str) -> Self {
+        Self {
+            summary: format!("{MCP_SUMMARY_PREFIX}{qualified}"),
+            markdown: false,
+        }
+    }
+
+    fn output(&self, text: TextOutput) -> ToolOutput {
+        if self.markdown {
+            ToolOutput::Markdown(text)
+        } else {
+            ToolOutput::Plain(text)
+        }
+    }
+}
+
+fn search_query(input: &Value) -> &str {
+    input[SEARCH_QUERY_FIELD].as_str().unwrap_or_default()
+}
+
+pub fn routed_view(name: &str, input: &Value) -> Option<RoutedView> {
+    if name == TOOL_SEARCH_TOOL_NAME {
+        Some(RoutedView::tool_search(input))
+    } else if is_wire_name(name) {
+        Some(RoutedView::mcp(&internal_tool_name(name)))
+    } else {
+        None
+    }
+}
+
 /// MCP, local, and search tools never go through invocation parsing,
 /// so there is no parsed input to show; the UI gets the raw JSON instead.
 fn emit_raw_start(
@@ -825,10 +850,10 @@ fn run_tool_search(
     origin: CallOrigin,
 ) -> ToolDoneEvent {
     let tool_id: Arc<str> = Arc::from(TOOL_SEARCH_TOOL_NAME);
-    let query = input["query"].as_str().unwrap_or_default();
-    emit_raw_start(ctx, origin, &id, &tool_id, query.to_owned(), input);
+    let view = RoutedView::tool_search(input);
+    emit_raw_start(ctx, origin, &id, &tool_id, view.summary.clone(), input);
     let deferral = ToolDeferral::for_model(&ctx.model);
-    let (output, is_error) = match mcp.search_tools(query, origin, deferral) {
+    let (output, is_error) = match mcp.search_tools(search_query(input), origin, deferral) {
         Ok(found) => (found, false),
         Err(e) => (e.into(), true),
     };
@@ -836,10 +861,66 @@ fn run_tool_search(
         call: None,
         id,
         tool: tool_id,
-        output: Arc::new(ToolOutput::Markdown(output)),
+        output: Arc::new(view.output(output)),
         is_error,
         annotation: None,
         written_path: None,
+    }
+}
+
+/// Why a file-mutating tool is stopped before its permission check, if it is.
+fn mutation_block(ctx: &ToolContext, name: &str, key: &FileKey) -> Option<String> {
+    if let Some(chat) = ctx.background_for
+        && let Some(reason) = AgentSeed::background_write_block(chat)
+    {
+        warn!(
+            tool = %name,
+            %chat,
+            target = %key.as_path().display(),
+            reason = %reason,
+            "blocked background write"
+        );
+        return Some(reason);
+    }
+    let plan = ctx.mode.plan_path();
+    if plan.is_some_and(|plan| FileKey::new(plan) == *key) {
+        return None;
+    }
+    if plan.is_some() {
+        warn!(
+            tool = %name,
+            target = %key.as_path().display(),
+            "blocked write in plan mode"
+        );
+        return Some(crate::tools::PLAN_WRITE_RESTRICTED.into());
+    }
+    ctx.permissions.boundary_block_reason(key.as_path())
+}
+
+/// May `tool` change `path` right now without asking anyone? This is for a
+/// plugin that changes the disk itself, so there is no tool call to prompt
+/// on, and no call to hand an input hook that could rewrite, deny or
+/// escalate it. A rule or YOLO must already allow it.
+pub fn silent_mutation_check(ctx: &ToolContext, tool: &str, path: &str) -> Result<(), String> {
+    if let Some(reason) = mutation_block(ctx, tool, &FileKey::new(Path::new(path))) {
+        return Err(reason);
+    }
+    if ctx
+        .registry
+        .hook()
+        .is_some_and(|hook| hook.wraps(tool, HookStage::Input))
+    {
+        return Err(format!(
+            "a plugin hooks `{tool}`, so it must run as a tool call"
+        ));
+    }
+    match ctx
+        .permissions
+        .check(&ToolKey::native(tool), path, ctx.mode.plan_path())
+    {
+        PermissionCheck::Allowed => Ok(()),
+        PermissionCheck::Denied(reason) => Err(reason),
+        PermissionCheck::NeedsPrompt { .. } => Err(format!("`{tool}` on {path} needs permission")),
     }
 }
 
@@ -992,12 +1073,13 @@ async fn execute_mcp_tool(
     ask: Option<&str>,
     hook: Option<&Hook<'_>>,
 ) -> ToolDoneEvent {
-    emit_raw_start(ctx, origin, id, &tool, format!("mcp: {tool}"), input);
+    let view = RoutedView::mcp(&tool);
+    emit_raw_start(ctx, origin, id, &tool, view.summary.clone(), input);
     let done = |output: TextOutput, is_error: bool| ToolDoneEvent {
         call: None,
         id: id.to_owned(),
         tool: Arc::clone(&tool),
-        output: Arc::new(ToolOutput::Plain(output)),
+        output: Arc::new(view.output(output)),
         is_error,
         annotation: None,
         written_path: None,
@@ -1207,7 +1289,7 @@ mod tests {
     use crate::tools::registry::{ToolRegistry, ToolSource};
     use crate::tools::schema::{JsonPath, ToolInputErrorKind};
     use crate::tools::test_support::{
-        GUARDED_TOOL_NAME, GuardedMock, mock_tool, mock_tool_with_schema, stub_ctx,
+        GUARDED_TOOL_NAME, GuardedMock, mock_tool, mock_tool_with_schema, stub_ctx, stub_ctx_with,
         stub_ctx_with_permissions, stub_seed,
     };
     use crate::tools::{
@@ -1249,6 +1331,9 @@ mod tests {
     /// Allowed by the shared stub permissions; nothing is ever written here.
     const TEST_ROOT: &str = "/tmp";
     const PLAN_PATH: &str = "/tmp/plan.md";
+    const INSIDE_ROOT: &str = "/tmp/maki-never-created/a";
+    const OUTSIDE_ROOT: &str = "/etc/maki-never-created/a";
+    const WRITE_TOOL: &str = "write";
     const HOOK_CALL_DEADLINE: Duration = Duration::from_secs(7);
     const HOOK_SLOW_COMMAND: &str = "slow";
     /// Real elapsed time inside the call, so the gap between the two stages'
@@ -2391,6 +2476,37 @@ mod tests {
         });
     }
 
+    /// Lua draws a batch child from `routed_view`, so the standalone call
+    /// must emit the same summary and body format.
+    #[test_case(TOOL_SEARCH_TOOL_NAME, search_input(), SEARCH_QUERY,     true  ; "tool_search_shows_query_as_markdown")]
+    #[test_case(PROBE_WIRE,            json!({}),      "mcp: srv.probe", false ; "mcp_tool_shows_qualified_name_as_plain")]
+    fn routed_view_matches_the_dispatched_call(
+        name: &str,
+        input: Value,
+        summary: &str,
+        markdown: bool,
+    ) {
+        let view = routed_view(name, &input).expect("routed name");
+        assert_eq!(view.summary, summary);
+        assert_eq!(view.markdown, markdown);
+
+        let (tx, events) = flume::unbounded();
+        let ctx = with_mcp(
+            stub_ctx_with(&AgentMode::Build, Some(&EventSender::new(tx, 0)), None),
+            &stub_mcp(&[PROBE_QUALIFIED]),
+        );
+        let done = smol::block_on(dispatch(&ctx, name, &input));
+        let start = events
+            .try_iter()
+            .find_map(|envelope| match envelope.event {
+                AgentEvent::ToolStart(start) => Some(start),
+                _ => None,
+            })
+            .expect("ToolStart is emitted");
+        assert_eq!(start.summary, view.summary);
+        assert_eq!(done.output.is_markdown(), view.markdown);
+    }
+
     #[test]
     fn calling_deferred_mcp_tool_loads_it_and_records_the_load_in_its_result() {
         smol::block_on(async {
@@ -2665,6 +2781,35 @@ mod tests {
             assert!(text.contains(name), "got: {text}");
             assert_eq!(text.contains(MCP_SERVER_GONE), server_gone, "got: {text}");
         });
+    }
+
+    /// Outside the project only a rule lets the write through, since there is
+    /// nobody to ask. Plan mode blocks even what a rule allows.
+    #[test_case(AgentMode::Build, None, INSIDE_ROOT, true ; "inside_the_project")]
+    #[test_case(AgentMode::Build, None, OUTSIDE_ROOT, false ; "outside_needs_a_prompt")]
+    #[test_case(AgentMode::Build, Some(Effect::Allow), OUTSIDE_ROOT, true ; "outside_allowed_by_rule")]
+    #[test_case(AgentMode::Build, Some(Effect::Deny), INSIDE_ROOT, false ; "inside_denied_by_rule")]
+    #[test_case(AgentMode::Plan(PathBuf::from(PLAN_PATH)), Some(Effect::Allow), INSIDE_ROOT, false ; "plan_mode")]
+    fn silent_mutation_needs_no_prompt(
+        mode: AgentMode,
+        rule: Option<Effect>,
+        path: &str,
+        allowed: bool,
+    ) {
+        let ctx = match rule {
+            Some(effect) => ruled_ctx(&mode, ToolKey::native(WRITE_TOOL), effect),
+            None => rules_ctx(&mode, Vec::new()),
+        };
+        let result = silent_mutation_check(&ctx, WRITE_TOOL, path);
+        assert_eq!(result.is_ok(), allowed, "got {result:?}");
+    }
+
+    #[test]
+    fn silent_mutation_refused_while_hooked() {
+        let ctx = rules_ctx(&AgentMode::Build, Vec::new());
+        ctx.registry
+            .set_hook(RecordingHook::never_answering(&[HookStage::Input]));
+        assert!(silent_mutation_check(&ctx, WRITE_TOOL, INSIDE_ROOT).is_err());
     }
 
     /// Plan mode puts MCP behind the user, it does not block it outright. An

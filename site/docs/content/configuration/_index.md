@@ -87,7 +87,7 @@ All fields are optional. Typos in field names cause an error right away.
 
 Name of the color theme to load at startup, overriding the theme you last picked interactively. If unset, Maki keeps your last selection (the built-in default on first run). An unknown name is ignored with a warning.
 
-Available themes: `ayu_dark`, `ayu_light`, `ayu_mirage`, `carbonfox`, `catppuccin_frappe`, `catppuccin_latte`, `catppuccin_macchiato`, `catppuccin_mocha`, `dark_daltonized`, `dracula`, `everforest_dark`, `fleet_dark`, `github_dark`, `gruvbox`, `gruvbox_light`, `kanagawa`, `kanagawa_ink`, `kanagawa_plum`, `material_darker`, `monokai_pro`, `night_owl`, `nightfox`, `nord`, `onedark`, `rose_pine`, `rose_pine_dawn`, `rose_pine_midnight`, `rose_pine_moon`, `solarized_dark`, `solarized_light`, `tokyonight`, `vscode_dark_plus`, `zenburn`.
+Available themes: `ayu_dark`, `ayu_light`, `ayu_mirage`, `carbonfox`, `catppuccin_frappe`, `catppuccin_latte`, `catppuccin_macchiato`, `catppuccin_mocha`, `dark_daltonized`, `dracula`, `everforest_dark`, `fleet_dark`, `github_dark`, `gruvbox`, `gruvbox_light`, `kanagawa`, `kanagawa_ink`, `kanagawa_plum`, `material_darker`, `monokai_pro`, `night_owl`, `nightfox`, `nord`, `onedark`, `rose_pine`, `rose_pine_dawn`, `rose_pine_midnight`, `rose_pine_moon`, `solarized_dark`, `solarized_light`, `system`, `tokyonight`, `vscode_dark_plus`, `zenburn`.
 
 You can add your own themes too. Drop a `<name>.toml` file into `themes/` inside your Maki config directory, for example `~/.config/maki/themes/`. If it reuses a built-in name, yours wins.
 
@@ -188,6 +188,31 @@ maki.setup({
 
 `paths` is a list of globs matched against the project root, empty by default. `prompt` is a bool, `true` by default. Setting it to `false` drops the startup card and leaves the folder restricted unless a `paths` entry matches. [Folder Trust](/docs/folder-trust/#trust-policy) covers glob syntax and which run modes apply the policy.
 
+### `instructions`
+
+Which instruction files Maki loads from each project directory. Read from the global `~/.config/maki/init.lua` only, since a project file that could pick its own instructions would be trusting itself.
+
+`files` replaces the built-in list (`AGENTS.md`, `CLAUDE.md`, `.github/copilot-instructions.md`, and friends) with your own, in priority order. An empty list loads no project instruction files at all, and `AGENTS.local.md` still loads:
+
+```lua
+maki.setup({
+    instructions = { files = { "CLAUDE.md" } },
+})
+```
+
+`overrides` narrows it per checkout, for when one repository wants a different answer. Each entry matches a checkout by `path` (a glob against the project root, `~` included, like `trust.paths`) or by `remote` (a glob against every git remote URL of the project, normalized to `host/path`: `https://host/a/b.git` and `git@host:a/b.git` both become `host/a/b`). When both are set, both must match; an entry with neither matches every project. The first matching entry wins, and one that sets no `files` still ends the search, keeping the global `files`:
+
+```lua
+maki.setup({
+    instructions = {
+        overrides = {
+            { remote = "github.com/example/*", files = {} },
+            { path = "~/src/secret", files = { "CLAUDE.md" } },
+        },
+    },
+})
+```
+
 ### `telemetry`
 
 | Field | Type | Default | Env | Description |
@@ -195,26 +220,24 @@ maki.setup({
 | `enabled` | bool | `false` | `MAKI_ENABLE_TELEMETRY` | Master switch |
 | `metrics_exporter` | string | `none` | `OTEL_METRICS_EXPORTER` | Where metrics go: `otlp`, `console`, `none`, or a comma-separated mix |
 | `logs_exporter` | string | `none` | `OTEL_LOGS_EXPORTER` | Where events go: `otlp`, `console`, `none`, or a comma-separated mix |
-| `protocol` | string | `-` | `OTEL_EXPORTER_OTLP_PROTOCOL` | OTLP protocol: `grpc`, `http/protobuf`, or `http/json`. Required when an exporter is `otlp` |
-| `endpoint` | string | `-` | `OTEL_EXPORTER_OTLP_ENDPOINT` | Collector endpoint. HTTP appends `/v1/metrics` and `/v1/logs` |
-| `headers` | table | `{}` | `OTEL_EXPORTER_OTLP_HEADERS` | Extra headers sent with every export |
-| `timeout_ms` | integer | `10000` | `OTEL_EXPORTER_OTLP_TIMEOUT` | Per-export request timeout (ms) |
+| `protocol` | string | `http/json` | `OTEL_EXPORTER_OTLP_PROTOCOL` | OTLP protocol: `grpc`, `http/protobuf`, or `http/json` |
+| `endpoint` | string | `http://localhost:4318` | `OTEL_EXPORTER_OTLP_ENDPOINT` | Collector endpoint. HTTP appends `/v1/metrics` and `/v1/logs`. The gRPC default is `http://localhost:4317` |
+| `headers` | table | `{}` | `OTEL_EXPORTER_OTLP_HEADERS` | Headers sent with every export |
+| `timeout_ms` | integer | `10000` | `OTEL_EXPORTER_OTLP_TIMEOUT` | Deadline for one export, retries included (ms) |
 | `compression` | string | `none` | `OTEL_EXPORTER_OTLP_COMPRESSION` | Payload compression: `gzip` or `none` |
 | `metrics_protocol` | string | `-` | `OTEL_EXPORTER_OTLP_METRICS_PROTOCOL` | Metrics-only protocol override |
 | `metrics_endpoint` | string | `-` | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | Metrics-only endpoint, used verbatim with no path appended |
 | `metrics_headers` | table | `{}` | `OTEL_EXPORTER_OTLP_METRICS_HEADERS` | Metrics-only headers, merged over `headers` |
-| `metrics_timeout_ms` | integer | `-` | `OTEL_EXPORTER_OTLP_METRICS_TIMEOUT` | Metrics-only request timeout (ms) |
+| `metrics_timeout_ms` | integer | `-` | `OTEL_EXPORTER_OTLP_METRICS_TIMEOUT` | Metrics-only export deadline (ms) |
 | `logs_protocol` | string | `-` | `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL` | Logs-only protocol override |
 | `logs_endpoint` | string | `-` | `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | Logs-only endpoint, used verbatim with no path appended |
 | `logs_headers` | table | `{}` | `OTEL_EXPORTER_OTLP_LOGS_HEADERS` | Logs-only headers, merged over `headers` |
-| `logs_timeout_ms` | integer | `-` | `OTEL_EXPORTER_OTLP_LOGS_TIMEOUT` | Logs-only request timeout (ms) |
+| `logs_timeout_ms` | integer | `-` | `OTEL_EXPORTER_OTLP_LOGS_TIMEOUT` | Logs-only export deadline (ms) |
 | `metrics_interval_ms` | integer | `60000` | `OTEL_METRIC_EXPORT_INTERVAL` | How often metrics are exported (ms) |
-| `metrics_export_timeout_ms` | integer | `30000` | `OTEL_METRIC_EXPORT_TIMEOUT` | Deadline for one metrics export, retries included (ms) |
-| `logs_interval_ms` | integer | `5000` | `OTEL_LOGS_EXPORT_INTERVAL`, `OTEL_BLRP_SCHEDULE_DELAY` | How often queued events are flushed (ms) |
-| `logs_max_queue_size` | integer | `2048` | `OTEL_BLRP_MAX_QUEUE_SIZE` | Event queue capacity. Events are dropped and counted when it is full |
+| `logs_interval_ms` | integer | `1000` | `OTEL_LOGS_EXPORT_INTERVAL`, `OTEL_BLRP_SCHEDULE_DELAY` | How often queued events are flushed (ms) |
+| `logs_max_queue_size` | integer | `2048` | `OTEL_BLRP_MAX_QUEUE_SIZE` | Event queue capacity, at most 65536. Events are dropped when it is full |
 | `logs_max_export_batch_size` | integer | `512` | `OTEL_BLRP_MAX_EXPORT_BATCH_SIZE` | Maximum events per export request |
-| `logs_export_timeout_ms` | integer | `30000` | `OTEL_BLRP_EXPORT_TIMEOUT` | Deadline for one events export, retries included (ms) |
-| `metrics_temporality` | string | `delta` | `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE` | Metric temporality: `delta` or `cumulative` |
+| `metrics_temporality` | string | `delta` | `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE` | Metric temporality: `cumulative`, `delta` or `lowmemory` |
 | `service_name` | string | `maki` | `OTEL_SERVICE_NAME` | `service.name` on the exported resource |
 | `resource_attributes` | table | `{}` | `OTEL_RESOURCE_ATTRIBUTES` | Extra resource attributes, your place for team or environment labels |
 | `metrics_include_session_id` | bool | `true` | `OTEL_METRICS_INCLUDE_SESSION_ID` | Attach `session.id` to metrics. Turn off to keep metric cardinality low |
@@ -223,7 +246,7 @@ maki.setup({
 | `log_tool_details` | bool | `false` | `OTEL_LOG_TOOL_DETAILS` | Include tool input in `maki.tool_result` events. Off by default |
 | `content_max_length` | integer | `10240` | `MAKI_OTEL_CONTENT_MAX_LENGTH` | Character cap on any logged prompt or tool input |
 
-Every field also has an environment variable, shown in the Env column, and the variable wins. See [Telemetry](/docs/telemetry/) for the full picture.
+The Env column names the matching environment variable. For `enabled`, the exporters, `metrics_include_*`, `log_user_prompts`, `log_tool_details` and `content_max_length`, the variable wins. Every other field is passed to the OpenTelemetry SDK and wins over its variable. See [Telemetry](/docs/telemetry/) for the full picture.
 
 ## Plugins
 
@@ -317,6 +340,7 @@ maki.setup({
 
 | Field | Type | Default | Min | Description |
 |-------|------|---------|-----|-------------|
+| `allow_background` | boolean | `false` | - | Expose a `background` input that pushes subagent results to the chat when they finish. |
 | `allow_model` | boolean | `false` | - | Expose a `model` input that overrides the subagent model. Only enable if you trust callers to pick an exact model themselves. |
 | `max_concurrent` | integer | `8` | 1 | Max concurrently running subagents. |
 
@@ -335,7 +359,8 @@ maki.setup({
 | `max_output_bytes` | integer | - | - | Override `agent.max_output_bytes` for this tool. |
 | `max_output_lines` | integer | - | - | Override `agent.max_output_lines` for this tool. |
 | `max_response_bytes` | integer | `5242880` | 1024 | Stop reading a response after this many bytes. |
-| `provider` | string | `"exa"` | - | Search backend: "exa" (default) or "youcom" (You.com MCP). |
+| `provider` | string | `"exa"` | - | Search backend: "exa" (default), "youcom" (You.com MCP), "kagi" (Kagi MCP, needs KAGI_API_KEY), or "searxng" (self-hosted). |
+| `searxng_base_url` | string | `""` | - | SearXNG instance URL; falls back to the `SEARXNG_BASE_URL` env var. A LAN instance also needs its host in `net.allowed_private_hosts`. Only this backend accepts websearch's `time_range` (day, week, month, or year); its `num_results` is capped by the instance page size. |
 
 ## Validation
 
@@ -373,6 +398,7 @@ On top of the project instruction files Maki loads from the git root down to the
 
 - `AGENTS.local.md` in any of those project directories for per-directory preferences (gitignored)
 - `~/.config/maki/AGENTS.md` for preferences that apply to all projects
+- `instructions.files` in the global `init.lua` to replace the project file list, scoped per checkout with `instructions.overrides` (see [`instructions`](#instructions))
 
 All of these are added to the system prompt at the start of every session.
 

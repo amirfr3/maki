@@ -145,7 +145,11 @@ pub mod key {
     pub const SCROLL_LINE_UP: Bind = ctrl_bind!('y');
     pub const SCROLL_LINE_DOWN: Bind = ctrl_bind!('e');
     pub const SCROLL_TOP: Bind = ctrl_bind!('g');
-    pub const SCROLL_BOTTOM: Bind = ctrl_bind!('b');
+    pub const SCROLL_BOTTOM: Bind = Bind {
+        code: KeyCode::Char('g'),
+        modifiers: KeyModifiers::CONTROL.union(KeyModifiers::ALT),
+        label: mod_key!("Alt+G"),
+    };
     pub const POP_QUEUE: Bind = ctrl_bind!('q');
     pub const DELETE_WORD: Bind = ctrl_bind!('w');
     pub const SEARCH: Bind = ctrl_bind!('f');
@@ -317,7 +321,7 @@ pub struct Keybind {
 pub const KEYBINDS: &[Keybind] = &[
     Keybind {
         label: KeyLabel::Single(key::QUIT.label),
-        description: "Quit / clear input",
+        description: "Quit / clear input / copy selection",
         context: KeybindContext::General,
         platform: Platform::All,
     },
@@ -380,7 +384,7 @@ pub const KEYBINDS: &[Keybind] = &[
     },
     Keybind {
         label: KeyLabel::Single("Tab"),
-        description: "Toggle mode",
+        description: "Switch between plan and build",
         context: KeybindContext::Editing,
         platform: Platform::All,
     },
@@ -399,6 +403,12 @@ pub const KEYBINDS: &[Keybind] = &[
     Keybind {
         label: KeyLabel::MacMulti(&["Alt+←", "Alt+→"], &["⌥←", "⌥→"]),
         description: "Move word left / right",
+        context: KeybindContext::Editing,
+        platform: Platform::All,
+    },
+    Keybind {
+        label: KeyLabel::Single("Shift+motion"),
+        description: "Select text",
         context: KeybindContext::Editing,
         platform: Platform::All,
     },

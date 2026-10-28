@@ -3,21 +3,23 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use maki_agent::agent::tool_dispatch::silent_mutation_check;
 use maki_agent::cancel::CancelToken;
 use maki_agent::tools::{
     Deadline, FileKey, MAIN_TASK_ID, ToolAudience, ToolContext, ToolLive, ToolOutputMode,
 };
 use maki_config::{AgentConfig, ToolOutputLines};
-use maki_storage::id::SessionRef;
+use maki_storage::id::{MakiId, SessionRef};
 use mlua::{LuaSerdeExt, MultiValue, UserData, UserDataMethods, Value as LuaValue};
 
 use crate::api::tool::ToolCallReply;
 use crate::api::ui::buf::BufHandle;
 use crate::api::util::convert::json_to_lua;
-use crate::api::util::pair::Pair;
+use crate::api::util::pair::{Pair, pair};
 use crate::runtime::{RestoreReason, active_task, lock_cell};
 
 const DEADLINE_ALREADY_SET_MSG: &str = "ctx:set_deadline() already called";
+const WRITE_TOOL: &str = "write";
 
 fn send_live_buf(lua: &mlua::Lua, buf: &mlua::AnyUserData) -> mlua::Result<()> {
     let shared = buf.borrow::<BufHandle>().map(|h| Arc::clone(&h.buf))?;
@@ -168,6 +170,10 @@ impl LuaCtx {
             task_id: ctx.task_id,
             finish_tx: None,
         }
+    }
+
+    pub(crate) fn session(&self) -> Option<MakiId> {
+        self.session_id.as_ref().map(SessionRef::id)
     }
 
     /// Dispatch capability: only handler ctxs can call `maki.agent.*`.
@@ -352,6 +358,18 @@ impl UserData for LuaCtx {
             Ok((Some(true), None))
         });
 
+        // A plugin that changes the disk itself has no tool call to hang a
+        // prompt on, so this says yes only where the write tool would run
+        // without asking anyone.
+        methods.add_method("can_write", |_, this, path: String| {
+            let Some(agent) = this.agent() else {
+                return Ok(this.cap_err_pair("can_write"));
+            };
+            Ok(pair(
+                silent_mutation_check(agent, WRITE_TOOL, &path).map(|()| true),
+            ))
+        });
+
         methods.add_async_method(
             "load_instructions",
             |_, this, dir_path: String| async move {
@@ -360,6 +378,7 @@ impl UserData for LuaCtx {
                 };
                 let loaded = agent.loaded_instructions.clone();
                 let call = agent.call_instructions.clone();
+                let files = Arc::clone(&agent.instruction_files);
                 // Nothing may hold the ctx borrow across the wait: a cancel
                 // hook firing meanwhile needs `ctx:finish`, which takes it
                 // mutably.
@@ -367,7 +386,7 @@ impl UserData for LuaCtx {
                 let blocks = smol::unblock(move || {
                     let cwd = std::env::current_dir().unwrap_or_default();
                     let abs = resolve_abs_with_cwd(dir_path, &cwd);
-                    maki_agent::find_subdirectory_instructions(&abs, &cwd, &loaded)
+                    maki_agent::find_subdirectory_instructions(&abs, &cwd, &loaded, &files)
                 })
                 .await;
                 call.record(blocks);
@@ -375,8 +394,10 @@ impl UserData for LuaCtx {
             },
         );
 
-        methods.add_method("is_instruction_file", |_, _, name: String| {
-            Ok(maki_agent::is_instruction_file(&name))
+        methods.add_method("is_instruction_file", |_, this, name: String| {
+            Ok(this.agent().is_some_and(|agent| {
+                maki_agent::is_instruction_file(&agent.instruction_files, &name)
+            }))
         });
 
         methods.add_method_mut("finish", |lua, this, val: LuaValue| {

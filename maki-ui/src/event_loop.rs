@@ -7,6 +7,7 @@
 //! waits on every event source at once and wakes the moment a plugin action,
 //! agent event, or keypress arrives instead of sleeping in `event::poll`.
 
+use std::mem;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -18,22 +19,25 @@ use color_eyre::eyre::{Context, eyre};
 use crossterm::event::{
     Event, KeyEvent, KeyEventKind, MouseButton, MouseEvent as CtMouseEvent, MouseEventKind,
 };
+use maki_agent::agent::SessionExport;
 use maki_agent::command::CustomCommand;
 use maki_agent::permissions::PermissionManager;
 use maki_agent::session::Resumed;
 use maki_agent::{
-    AgentConfig, AgentEvent, CancelToken, Envelope, McpCommand, McpConfigErrors, McpHandle, mcp,
+    AgentConfig, AgentEvent, CancelToken, Envelope, McpCommand, McpConfigErrors, McpHandle,
+    Transcript, mcp,
 };
 use maki_config::project::TrustQuestion;
 use maki_config::{ModelPolicy, ProjectConfig, UiConfig};
+use maki_lua::agent_autocmd::HostEvent;
 use maki_lua::session_snapshot::{
     MODE_BUILD, MODE_PLAN, STATUS_IDLE, STATUS_NEEDS_INPUT, STATUS_WORKING, SessionQueueSnapshot,
     SessionSnapshot,
 };
 use maki_lua::{
-    EventHandle, HintReader, InputRequest, Key, KeymapReader, LuaCommandReader, ModelRequest,
-    PackCommand, PackPreparation, PlanRequest, SessionEndReason, SessionRequest, TaskRequest,
-    UiAction, UiAttachment, UiReply,
+    EventHandle, HintReader, InputMode, InputRequest, InputRulesReader, Key, KeymapReader,
+    LuaCommandReader, ModelRequest, PackCommand, PackPreparation, PlanRequest, SessionEndReason,
+    SessionRequest, TaskRequest, UiAction, UiAttachment, UiReply, WinEvent,
 };
 use maki_providers::Timeouts;
 use maki_providers::models_cache::{ModelList, fetch_all_models_cached};
@@ -46,7 +50,7 @@ use maki_storage::sessions::normalize_title;
 use ratatui::backend::Backend;
 use ratatui::layout::Rect;
 use serde_json::json;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::agent::{
     AgentHandles, ModelSlot, ModelSlots,
@@ -61,6 +65,7 @@ use crate::components::input::Submission;
 use crate::components::keybindings::key;
 use crate::components::usage_modal::UsageFetchState;
 use crate::components::{Action, ExitRequest, Status};
+use crate::decor_worker;
 use crate::input::InputReader;
 use crate::repaint::{Dirty, IDLE_POLL};
 use crate::theme;
@@ -112,6 +117,7 @@ pub struct EventLoopParams {
     pub lua_command_reader: LuaCommandReader,
     pub keymap_reader: KeymapReader,
     pub hint_reader: HintReader,
+    pub input_rules_reader: InputRulesReader,
     pub ui_action_rx: flume::Receiver<UiAction>,
     pub ui_wake_rx: flume::Receiver<()>,
     pub ui_attachment: UiAttachment,
@@ -403,6 +409,7 @@ struct SpawnCtx {
     lua_command_reader: LuaCommandReader,
     keymap_reader: KeymapReader,
     hint_reader: HintReader,
+    input_rules_reader: InputRulesReader,
     lua_event_handle: EventHandle,
     mcp_handle: Option<McpHandle>,
     mcp_config_errors: McpConfigErrors,
@@ -449,6 +456,7 @@ impl SpawnCtx {
             self.lua_command_reader.clone(),
             self.keymap_reader.clone(),
             self.hint_reader.clone(),
+            self.input_rules_reader.clone(),
             Arc::clone(&self.storage_writer),
             self.ui_config.clone(),
             self.input_history_size,
@@ -484,6 +492,8 @@ pub(crate) struct EventLoop<'t> {
     focused: usize,
     /// The `(session, task)` pair whose transcript was on screen last frame.
     last_focus: Option<(MakiId, Arc<str>)>,
+    /// The mode `ModeChanged` last announced, one for all tabs.
+    last_mode: InputMode,
     focus: Focus,
     notifier: Option<terminal::TerminalNotifier>,
     ctx: SpawnCtx,
@@ -514,6 +524,9 @@ enum Wake {
     /// Nothing to handle. The tick after every wake is what reads plugin
     /// windows.
     PluginWindow,
+    /// Nothing to handle either. The tick takes in what the worker finished
+    /// for the chat input.
+    Decor,
     Agent(usize, Box<maki_agent::Envelope>),
     Shell(usize, ShellEvent),
     Warn(String),
@@ -597,6 +610,7 @@ impl<'t> EventLoop<'t> {
             lua_command_reader,
             keymap_reader,
             hint_reader,
+            input_rules_reader,
             ui_action_rx,
             ui_wake_rx,
             ui_attachment,
@@ -658,6 +672,7 @@ impl<'t> EventLoop<'t> {
             lua_command_reader,
             keymap_reader,
             hint_reader,
+            input_rules_reader,
             lua_event_handle,
             mcp_handle,
             mcp_config_errors,
@@ -698,7 +713,7 @@ impl<'t> EventLoop<'t> {
             app.queue_flash(warning);
         }
         if let Some(alert) = startup_alert {
-            app.alert_modal.open(alert);
+            app.open_alert(alert);
         }
 
         let (pack_tx, pack_rx) = flume::unbounded();
@@ -707,6 +722,7 @@ impl<'t> EventLoop<'t> {
             sessions: runtimes,
             focused,
             last_focus: None,
+            last_mode: InputMode::Insert,
             focus: Focus::default(),
             notifier,
             ctx,
@@ -788,7 +804,7 @@ impl<'t> EventLoop<'t> {
             }) {
                 // A backgrounded session can finish an `exit_on_done` turn;
                 // focus it so shutdown reports its exit code and id.
-                self.focused = i;
+                self.set_focused(i);
                 self.emit_notifications();
                 break Ok(());
             }
@@ -834,6 +850,7 @@ impl<'t> EventLoop<'t> {
                 res.ok().map(|()| Wake::PluginWindow)
             });
         }
+        sel = sel.recv(decor_worker::wakes(), |res| res.ok().map(|()| Wake::Decor));
         sel = sel.recv(&self.warn_rx, |res| res.ok().map(Wake::Warn));
         sel = sel.recv(&self.pack_rx, |res| res.ok().map(Wake::Pack));
         sel = sel.recv(&self.models_rx, |res| {
@@ -857,7 +874,7 @@ impl<'t> EventLoop<'t> {
             Wake::Input(ev) => self.handle_input(ev),
             Wake::InputGone => return Err(eyre!("terminal input reader stopped")),
             Wake::Ui(action) => self.handle_ui_action(action),
-            Wake::PluginWindow => {}
+            Wake::PluginWindow | Wake::Decor => {}
             Wake::Agent(i, envelope) => self.handle_agent(i, envelope),
             Wake::Shell(i, event) => self.sessions[i].app.handle_shell_event(event),
             Wake::Warn(warning) => self.focused_app().flash(warning),
@@ -895,6 +912,7 @@ impl<'t> EventLoop<'t> {
             let actions = std::mem::take(&mut self.sessions[i].app.pending_actions);
             self.dispatch(i, actions);
         }
+        self.replay_typeahead();
         dirty
     }
 
@@ -946,6 +964,9 @@ impl<'t> EventLoop<'t> {
         // These only fire Lua autocmds. Anything a handler does comes back
         // as a `UiAction` on the next wake, which repaints then.
         self.emit_focus_changes();
+        self.sessions[self.focused]
+            .app
+            .announce_mode(&mut self.last_mode);
         dirty |= self.start_mailbox_runs();
         self.emit_status_changes();
         self.emit_title_changes();
@@ -982,13 +1003,19 @@ impl<'t> EventLoop<'t> {
                 let _ = reply_tx.send(code);
             }
             UiAction::OpenWin {
+                session,
                 buf,
                 config,
                 focus,
                 event_tx,
                 cmd_rx,
             } => {
-                let app = self.focused_app();
+                let Some(idx) = self.tab_of(session) else {
+                    debug!(session = ?session, "open_win for a session open in no tab, closed");
+                    let _ = event_tx.try_send(WinEvent::Close);
+                    return;
+                };
+                let app = &mut self.sessions[idx].app;
                 app.float_mgr.open(buf, config, focus, event_tx, cmd_rx);
                 if focus {
                     app.transition_plan(crate::app::mode::PlanTrigger::InteractivePrompt);
@@ -997,11 +1024,20 @@ impl<'t> EventLoop<'t> {
             UiAction::Session { req, reply_tx } => {
                 self.handle_session_request(req, reply_tx);
             }
+            UiAction::ExportSession { id, reply_tx } => match self.position(id) {
+                Some(idx) => {
+                    let _ = reply_tx.send(Ok(self.sessions[idx].app.export()));
+                }
+                None => self
+                    .answer_from_disk(id, reply_tx, |session| Ok(SessionExport::stored(session))),
+            },
             UiAction::Model { req, reply_tx } => {
                 let _ = reply_tx.send(self.handle_model_request(req));
             }
             UiAction::Input { req, reply_tx } => {
-                let _ = reply_tx.send(self.handle_input_request(req));
+                let (reply, actions) = self.handle_input_request(req);
+                let _ = reply_tx.send(reply);
+                self.dispatch(self.focused, actions);
             }
             UiAction::Task { req, reply_tx } => {
                 let _ = reply_tx.send(self.handle_task_request(req));
@@ -1015,9 +1051,32 @@ impl<'t> EventLoop<'t> {
             UiAction::WinRestView { scroll_top } => {
                 self.focused_app().scroll_to_row(scroll_top);
             }
-            UiAction::Builtin(action) => {
-                let actions = self.focused_app().run_builtin(action);
+            // Answered before dispatching, which can hold the loop for as long
+            // as `$EDITOR` is open.
+            UiAction::Builtin {
+                action,
+                caller,
+                reply_tx,
+            } => {
+                let (handled, actions) = self.focused_app().run_action(action, Some(&caller));
+                let _ = reply_tx.send(handled);
                 self.dispatch(self.focused, actions);
+            }
+            // Only the focused tab can be holding keys. A tab that loses focus
+            // hands them over in `set_focused`.
+            UiAction::KeybindDone(ticket) => {
+                let actions = self.focused_app().keybind_done(ticket);
+                self.dispatch(self.focused, actions);
+                self.replay_typeahead();
+            }
+            UiAction::KeybindFallback(ticket) => {
+                let actions = self.focused_app().keybind_fallback(ticket);
+                self.dispatch(self.focused, actions);
+            }
+            UiAction::PluginUnloaded(plugin) => {
+                for rt in &mut self.sessions {
+                    rt.app.clear_plugin_marks(&plugin);
+                }
             }
             UiAction::RunCommand {
                 cmdline,
@@ -1049,6 +1108,15 @@ impl<'t> EventLoop<'t> {
                     self.dispatch(idx, actions);
                 }
             }
+            UiAction::PluginTaskOpened {
+                session,
+                plugin,
+                info,
+            } => {
+                if let Some(rt) = self.sessions.iter_mut().find(|rt| rt.id() == session) {
+                    rt.app.open_plugin_task(&info, plugin);
+                }
+            }
         }
     }
 
@@ -1077,14 +1145,13 @@ impl<'t> EventLoop<'t> {
                 continue;
             }
             rt.last_status = status;
-            handle.fire_autocmd(
-                "SessionStatusChanged",
-                json!({
-                    "session_id": rt.id(),
-                    "title": rt.app.state.session.title,
-                    "status": status.as_str(),
-                    "focused": i == self.focused,
-                }),
+            handle.fire(
+                Some(&rt.id()),
+                HostEvent::SessionStatusChanged {
+                    title: &rt.app.state.session.title,
+                    status: status.as_str(),
+                    focused: i == self.focused,
+                },
             );
         }
     }
@@ -1098,13 +1165,12 @@ impl<'t> EventLoop<'t> {
                 continue;
             }
             rt.last_title = rt.app.state.session.title.clone();
-            handle.fire_autocmd(
-                "SessionTitleChanged",
-                json!({
-                    "session_id": rt.id(),
-                    "title": rt.last_title,
-                    "focused": i == self.focused,
-                }),
+            handle.fire(
+                Some(&rt.id()),
+                HostEvent::SessionTitleChanged {
+                    title: &rt.last_title,
+                    focused: i == self.focused,
+                },
             );
         }
     }
@@ -1116,18 +1182,34 @@ impl<'t> EventLoop<'t> {
         for rt in &mut self.sessions {
             let session_id = rt.app.state.session.id;
             diff_task_states(&mut rt.last_tasks, rt.app.task_states(), |task| {
-                let mut data = json!({
-                    "session_id": session_id,
-                    "id": task.id,
-                    "name": task.name,
-                    "status": task.status,
-                });
-                if let Some(plugin) = task.plugin {
-                    data["plugin"] = json!(plugin);
-                }
-                handle.fire_autocmd("TaskStatusChanged", data);
+                handle.fire(
+                    Some(&session_id),
+                    HostEvent::TaskStatusChanged {
+                        id: task.id,
+                        name: task.name,
+                        status: task.status.into(),
+                        plugin: task.plugin.map(|plugin| &**plugin),
+                    },
+                );
             });
         }
+    }
+
+    /// Called only after the cancel went out, so a handler that checks
+    /// `maki.agent.list()` already finds a stopped plugin task gone.
+    fn emit_task_stopped(&self, idx: usize, id: &str) {
+        let app = &self.sessions[idx].app;
+        let plugin = app
+            .task_states()
+            .find(|task| &**task.id == id)
+            .and_then(|task| task.plugin);
+        self.ctx.lua_event_handle.fire(
+            Some(&app.state.session.id),
+            HostEvent::TaskStopped {
+                id,
+                plugin: plugin.map(|plugin| &**plugin),
+            },
+        );
     }
 
     fn emit_notifications(&mut self) {
@@ -1171,15 +1253,16 @@ impl<'t> EventLoop<'t> {
         let switched = previous_session.is_some() && previous_session != Some(session_id);
         let eh = &self.ctx.lua_event_handle;
         if previous_session != Some(session_id) {
-            let mut data = json!({ "session_id": session_id });
-            if let Some(id) = previous_session {
-                data["previous_session_id"] = json!(id.to_string());
-            }
-            eh.fire_autocmd("SessionFocusChanged", data);
+            eh.fire(
+                Some(&session_id),
+                HostEvent::SessionFocusChanged {
+                    previous_session_id: previous_session.map(|id| id.to_string()),
+                },
+            );
         }
-        eh.fire_autocmd(
-            "TaskFocusChanged",
-            json!({ "session_id": session_id, "id": task_id }),
+        eh.fire(
+            Some(&session_id),
+            HostEvent::TaskFocusChanged { id: &task_id },
         );
         if switched {
             self.focused_app().announce_input();
@@ -1277,32 +1360,34 @@ impl<'t> EventLoop<'t> {
             SessionRequest::Current => {
                 let _ = reply_tx.send(Ok(json!(self.sessions[self.focused].id())));
             }
+            // A stored session is read from disk, off the loop like `List`.
             SessionRequest::Read { id } => {
-                let reply = match self.resolve_session_index(id.as_deref()) {
-                    Ok(idx) => Ok(self.session_snapshot_json(idx)),
-                    Err(e) => Err(e),
+                let id = match id.as_deref().map(parse_session_id).transpose() {
+                    Ok(id) => id,
+                    Err(e) => {
+                        let _ = reply_tx.send(Err(e));
+                        return;
+                    }
                 };
-                let _ = reply_tx.send(reply);
-            }
-            SessionRequest::New { prompt, focus } => {
-                let open = self.focused_app().blank_session();
-                // A blank session inherits the focused tab's model, whose slot
-                // is already built and sitting right here.
-                let slot = self.sessions[self.focused].slot.load_full();
-                let idx = self.push_runtime(self.ctx.spawn_runtime(open, slot));
-                let id = self.sessions[idx].id();
-                maki_otel::emit::session_started(
-                    maki_otel::emit::START_FRESH,
-                    Some(&id.to_string()),
-                );
-                if let Some(prompt) = prompt {
-                    let _ = self.submit_text(idx, prompt);
+                let live = match id {
+                    None => Ok(self.focused),
+                    Some(id) => self.position(id).ok_or(id),
+                };
+                match live {
+                    Ok(idx) => {
+                        let _ = reply_tx.send(Ok(self.session_snapshot_json(idx)));
+                    }
+                    Err(id) => self.answer_from_disk(id, reply_tx, |session| {
+                        serde_json::to_value(SessionSnapshot::stored(&session))
+                            .map_err(|e| e.to_string())
+                    }),
                 }
-                if focus {
-                    self.focused = idx;
-                }
-                let _ = reply_tx.send(Ok(json!(id)));
             }
+            SessionRequest::New {
+                transcript,
+                prompt,
+                focus,
+            } => self.create_session(*transcript, prompt, focus, reply_tx),
             SessionRequest::Prompt { id, text } => {
                 let idx = match id {
                     None => Ok(self.focused),
@@ -1351,17 +1436,34 @@ impl<'t> EventLoop<'t> {
 
     /// The input a plugin reads and writes is the focused session's.
     ///
-    /// An edit is answered against the terminal as it is now, not as the last
-    /// frame found it: a batch of wakes runs between two paints, so the size
-    /// the box would be drawn at has to be asked for here.
-    fn handle_input_request(&mut self, req: InputRequest) -> UiReply {
-        match req {
+    /// An edit or a submit is answered against the terminal as it is now, not
+    /// as the last frame found it: a batch of wakes runs between two paints,
+    /// so the size the box would be drawn at has to be asked for here.
+    fn handle_input_request(&mut self, req: InputRequest) -> (UiReply, Vec<Action>) {
+        let reply = match req {
             InputRequest::Read => Ok(self.focused_app().input_snapshot()),
             InputRequest::Edit(edit) => {
-                let area = self.terminal.size().map(Rect::from).unwrap_or_default();
+                let area = self.terminal_area();
                 self.focused_app().apply_input_edit(edit, area)
             }
-        }
+            InputRequest::Decorate(req) => self.focused_app().decorate_input(req),
+            InputRequest::Submit(req) => {
+                let area = self.terminal_area();
+                let version = req.version;
+                return match self.focused_app().submit_input(req, area) {
+                    Ok(actions) => (Ok(json!(true)), actions),
+                    Err(err) => {
+                        info!(version, error = %err, "input_submit refused");
+                        (Err(err), Vec::new())
+                    }
+                };
+            }
+        };
+        (reply, Vec::new())
+    }
+
+    fn terminal_area(&self) -> Rect {
+        self.terminal.size().map(Rect::from).unwrap_or_default()
     }
 
     /// Lua acts on the focused session, the same target the model picker
@@ -1413,6 +1515,11 @@ impl<'t> EventLoop<'t> {
             TaskRequest::List => Ok(json!(self.focused_app().tasks())),
             TaskRequest::Focus { id } => self.focused_app().focus_task(&id).map(|()| json!(true)),
             TaskRequest::Remove { id } => self.focused_app().remove_task(&id).map(|()| json!(true)),
+            TaskRequest::Stop { id, session } => {
+                let action = self.focused_app().stop_task_in_session(&id, &session)?;
+                self.dispatch(self.focused, vec![action]);
+                Ok(json!(true))
+            }
         }
     }
 
@@ -1431,18 +1538,90 @@ impl<'t> EventLoop<'t> {
         }
     }
 
+    /// Without `prompt` or `focus` the session is only stored, and the reply
+    /// waits for the write. Otherwise it opens in a tab, which saves it on its
+    /// first checkpoint.
+    fn create_session(
+        &mut self,
+        transcript: Transcript,
+        prompt: Option<String>,
+        focus: bool,
+        reply_tx: flume::Sender<UiReply>,
+    ) {
+        let inherits_model = transcript.model.is_none();
+        let open = match self.sessions[self.focused].app.session_from(transcript) {
+            Ok(open) => open,
+            Err(e) => {
+                let _ = reply_tx.send(Err(e));
+                return;
+            }
+        };
+        if prompt.is_none() && !focus {
+            let storage = self.ctx.storage.clone();
+            smol::unblock(move || {
+                let reply = open.store(&storage).map(|id| json!(id));
+                let _ = reply_tx.send(reply.map_err(|e| e.to_string()));
+            })
+            .detach();
+            return;
+        }
+        // An inherited model's slot is already built and sitting right here.
+        let (slot, fallback) = if inherits_model {
+            (self.sessions[self.focused].slot.load_full(), None)
+        } else {
+            self.slots.get_or_fallback(&open.session.model)
+        };
+        let idx = self.push_runtime(self.ctx.spawn_runtime(open, slot));
+        let id = self.sessions[idx].id();
+        maki_otel::emit::session_started(maki_otel::emit::START_FRESH, Some(&id.to_string()));
+        if let Some(reason) = fallback {
+            self.sessions[idx].app.flash(reason);
+        }
+        if let Some(prompt) = prompt {
+            let _ = self.submit_text(idx, prompt);
+        }
+        if focus {
+            self.set_focused(idx);
+        }
+        let _ = reply_tx.send(Ok(json!(id)));
+    }
+
+    /// Reads a session no tab has open off the loop, without claiming it, so
+    /// one another maki holds still answers.
+    fn answer_from_disk<T: Send + 'static>(
+        &self,
+        id: MakiId,
+        reply_tx: flume::Sender<Result<T, String>>,
+        answer: impl FnOnce(AppSession) -> Result<T, String> + Send + 'static,
+    ) {
+        let storage = self.ctx.storage.clone();
+        smol::unblock(move || {
+            let reply = AppSession::read_only(id, &storage)
+                .map_err(|e| e.to_string())
+                .and_then(answer);
+            let _ = reply_tx.send(reply);
+        })
+        .detach();
+    }
+
     fn position(&self, id: MakiId) -> Option<usize> {
         self.sessions.iter().position(|rt| rt.id() == id)
     }
 
-    /// No id means the focused session. A plugin holding the id of a tab that
-    /// has since closed gets `session not live` back, so it knows to stop.
+    /// No session means the focused tab. A session that is open in no tab
+    /// has none, and the request should not land on some other tab instead.
+    fn tab_of(&self, session: Option<MakiId>) -> Option<usize> {
+        match session {
+            None => Some(self.focused),
+            Some(id) => self.position(id),
+        }
+    }
+
+    /// A plugin holding the id of a tab that has since closed gets
+    /// `session not live` back, so it knows to stop.
     fn resolve_session_index(&self, id: Option<&str>) -> Result<usize, String> {
-        let Some(id) = id else {
-            return Ok(self.focused);
-        };
-        let parsed = parse_session_id(id)?;
-        self.position(parsed).ok_or_else(|| NOT_LIVE_ERR.into())
+        let session = id.map(parse_session_id).transpose()?;
+        self.tab_of(session).ok_or_else(|| NOT_LIVE_ERR.into())
     }
 
     /// The totals live on the session, so a plugin that reloads mid run keeps
@@ -1460,6 +1639,8 @@ impl<'t> EventLoop<'t> {
             } else {
                 MODE_BUILD
             },
+            thinking: Some(app.state.thinking.to_string()),
+            fast: Some(app.state.fast),
             status: SessionStatus::of(app).as_str(),
             focused: idx == self.focused,
             updated_at: app.state.session.updated_at,
@@ -1468,7 +1649,7 @@ impl<'t> EventLoop<'t> {
             }),
             usage: app.state.token_usage,
             context_size: app.state.context_size,
-            context_window: app.state.model.context_window,
+            context_window: Some(app.state.model.context_window),
             cost: app.state.cost,
         };
         json!(snapshot)
@@ -1486,6 +1667,21 @@ impl<'t> EventLoop<'t> {
         rt
     }
 
+    /// The single place the focused tab changes. Keys held behind a key
+    /// handler were typed at the keyboard, so they follow it to the new tab
+    /// rather than replay into the one left behind. They keep waiting there:
+    /// the handler that switched is usually not done, and its `KeybindDone`
+    /// goes to the focused tab.
+    fn set_focused(&mut self, idx: usize) {
+        if idx == self.focused {
+            return;
+        }
+        let left = mem::replace(&mut self.focused, idx);
+        if let Ok([from, to]) = self.sessions.get_disjoint_mut([left, idx]) {
+            from.app.hand_typeahead_to(&mut to.app);
+        }
+    }
+
     fn push_runtime(&mut self, rt: SessionRuntime) -> usize {
         self.sessions.push(rt);
         self.sessions.len() - 1
@@ -1496,7 +1692,7 @@ impl<'t> EventLoop<'t> {
     /// as a new runtime so the session you came from stays live.
     fn focus_session(&mut self, id: MakiId) -> Result<(), String> {
         if let Some(i) = self.position(id) {
-            self.focused = i;
+            self.set_focused(i);
             return Ok(());
         }
         // A session another maki owns is refused here, where it costs a flash,
@@ -1513,7 +1709,8 @@ impl<'t> EventLoop<'t> {
             self.apply_model(idx, slot);
             self.respawn_agent(idx, history);
         } else {
-            self.focused = self.push_runtime(self.ctx.spawn_runtime(open, slot));
+            let idx = self.push_runtime(self.ctx.spawn_runtime(open, slot));
+            self.set_focused(idx);
         }
         if let Some(reason) = reason {
             self.focused_app().flash(reason);
@@ -1641,6 +1838,20 @@ impl<'t> EventLoop<'t> {
         (latest, leftover)
     }
 
+    /// Held keys replay up to the next one with actions, and those run before
+    /// the keys after it replay, in whichever tab has the keyboard by then.
+    /// So the keys typed after `/fork` land in the fork. Every round replays
+    /// at least one key, so this ends.
+    fn replay_typeahead(&mut self) {
+        loop {
+            let actions = self.focused_app().replay_typeahead();
+            if actions.is_empty() {
+                return;
+            }
+            self.dispatch(self.focused, actions);
+        }
+    }
+
     fn dispatch(&mut self, idx: usize, actions: Vec<Action>) {
         for action in actions {
             self.handle_action(idx, action);
@@ -1693,7 +1904,8 @@ impl<'t> EventLoop<'t> {
     /// already built.
     fn open_fork(&mut self, idx: usize, open: OpenSession) {
         let slot = self.sessions[idx].slot.load_full();
-        self.focused = self.push_runtime(self.ctx.spawn_runtime(open, slot));
+        let fork = self.push_runtime(self.ctx.spawn_runtime(open, slot));
+        self.set_focused(fork);
         let id = self.sessions[self.focused].id();
         maki_otel::emit::session_started(maki_otel::emit::START_FRESH, Some(&id.to_string()));
         self.focused_app()
@@ -1721,10 +1933,14 @@ impl<'t> EventLoop<'t> {
                 rt.handles.cancel_run(run_id);
             }
             Action::CancelSubagent { tool_use_id } => {
-                self.sessions[idx].handles.cancel_subagent(tool_use_id);
+                self.sessions[idx]
+                    .handles
+                    .cancel_subagent(tool_use_id.clone());
+                self.emit_task_stopped(idx, &tool_use_id);
             }
             Action::CancelPluginTask { id } => {
                 self.ctx.lua_event_handle.cancel_plugin_session(&id);
+                self.emit_task_stopped(idx, &id);
             }
             Action::RestartAgent(history) => self.respawn_agent(idx, history),
             Action::OpenFork(open) => self.open_fork(idx, *open),
@@ -1781,11 +1997,12 @@ impl<'t> EventLoop<'t> {
                 let current_text = self.sessions[idx].app.input_box.buffer.value();
                 let result = {
                     let _pause = self.input.pause();
-                    terminal::edit_temp_content(&current_text, self.terminal)
+                    terminal::edit_temp_content(current_text, self.terminal)
                 };
                 self.focus.on_resume();
                 match result {
-                    Ok(edited) => self.sessions[idx].app.input_box.set_input(edited),
+                    Ok(edited) if edited == current_text => {}
+                    Ok(edited) => self.sessions[idx].app.input_box.rewrite_input(&edited),
                     Err(e) => self.sessions[idx].app.flash(e),
                 }
             }
