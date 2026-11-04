@@ -289,12 +289,9 @@ static BASE: LazyLock<ArcSwap<Theme>> =
 /// theme switch re-applies them, and an unload drops them.
 static STYLE_OVERRIDES: Mutex<BTreeMap<String, (String, SpanStyle)>> = Mutex::new(BTreeMap::new());
 
-/// The theme keys that are a bare [`Color`] rather than a [`Style`].
-const MODE_COLOR_NAMES: &[&str] = &["mode_build", "mode_plan", "mode_bash"];
-
-/// Names a plugin may override: a field to write, plus the mode colours.
+/// Names a plugin may override: every style with a field behind it.
 pub fn is_settable_style(name: &str) -> bool {
-    STYLE_FIELDS.contains(&name) || MODE_COLOR_NAMES.contains(&name)
+    STYLE_FIELDS.contains(&name)
 }
 
 fn overrides() -> BTreeMap<String, (String, SpanStyle)> {
@@ -309,22 +306,8 @@ pub fn set_style_override(
     name: &str,
     style: Option<SpanStyle>,
 ) -> Result<(), String> {
-    if let Some(style) = &style {
-        if !is_settable_style(name) {
-            return Err(format!("{name} is not a style a theme can paint"));
-        }
-        // A mode key is a bare color, so only its foreground lands. Say so
-        // rather than accept a bold or a background that does nothing.
-        if MODE_COLOR_NAMES.contains(&name) {
-            let resolved = match style {
-                SpanStyle::Default => Style::default(),
-                SpanStyle::Named(named) => style_by_name(named),
-                SpanStyle::Inline(inline) => inline_to_style(inline),
-            };
-            if resolved.fg.is_none() || resolved.bg.is_some() || !resolved.add_modifier.is_empty() {
-                return Err(format!("{name} is a single colour, so it takes fg only"));
-            }
-        }
+    if style.is_some() && !is_settable_style(name) {
+        return Err(format!("{name} is not a style a theme can paint"));
     }
     {
         let mut overrides = STYLE_OVERRIDES.lock().unwrap();
@@ -540,6 +523,9 @@ named_styles!(t => {
     "spinner" => t.spinner,
     "thinking" => t.thinking,
     "error" => t.error,
+    "mode_build" => t.mode_build,
+    "mode_plan" => t.mode_plan,
+    "mode_bash" => t.mode_bash,
     "bold" => t.bold,
     "italic" => t.italic,
     "bold_italic" => t.bold_italic,
@@ -583,12 +569,6 @@ named_styles!(t => {
 ; derived: {
     "background" => Style::new().bg(t.background),
     "foreground" => Style::new().fg(t.foreground),
-    // Readable so a plugin can ask what color the mode label has, even
-    // though these keys are a bare Color and an override writes them
-    // through `mode_color_mut`.
-    "mode_build" => Style::new().fg(t.mode_build),
-    "mode_plan" => Style::new().fg(t.mode_plan),
-    "mode_bash" => Style::new().fg(t.mode_bash),
 });
 
 #[derive(Debug, Clone)]
@@ -659,9 +639,12 @@ pub struct Theme {
     pub keybind_key: Style,
     pub keybind_desc: Style,
     pub keybind_section: Style,
-    pub mode_build: Color,
-    pub mode_plan: Color,
-    pub mode_bash: Color,
+    /// The `[BUILD]` / `[PLAN]` / `[BASH]` label colour. A theme can name a
+    /// whole style in `[ui] mode_build`; without one it derives from the
+    /// syntax theme, as before.
+    pub mode_build: Style,
+    pub mode_plan: Style,
+    pub mode_bash: Style,
     pub queue: Style,
     pub plan_path: Style,
     pub status_notice: Style,
@@ -938,8 +921,6 @@ impl Theme {
             };
             if let Some(field) = style_field_mut(&mut theme, name) {
                 *field = style;
-            } else if let Some(color) = mode_color_mut(&mut theme, name) {
-                *color = style.fg.unwrap_or(*color);
             }
         }
         theme
@@ -1139,9 +1120,39 @@ impl Theme {
             keybind_key: style("keybind_key"),
             keybind_desc: style("keybind_desc"),
             keybind_section: style("keybind_section"),
-            mode_build: derived_color("mode_build", &["keyword.storage.type", "keyword"]),
-            mode_plan: derived_color("mode_plan", &["keyword", "keyword.storage.type"]),
-            mode_bash: derived_color("mode_bash", &["function.builtin", "function"]),
+            mode_build: {
+                let s = style("mode_build");
+                if s == Style::default() {
+                    Style::new().fg(derived_color(
+                        "mode_build",
+                        &["keyword.storage.type", "keyword"],
+                    ))
+                } else {
+                    s
+                }
+            },
+            mode_plan: {
+                let s = style("mode_plan");
+                if s == Style::default() {
+                    Style::new().fg(derived_color(
+                        "mode_plan",
+                        &["keyword", "keyword.storage.type"],
+                    ))
+                } else {
+                    s
+                }
+            },
+            mode_bash: {
+                let s = style("mode_bash");
+                if s == Style::default() {
+                    Style::new().fg(derived_color(
+                        "mode_bash",
+                        &["function.builtin", "function"],
+                    ))
+                } else {
+                    s
+                }
+            },
             queue: style("queue"),
             plan_path: style("plan_path"),
             status_notice: style("status_notice"),
@@ -1184,15 +1195,6 @@ impl Theme {
 
 pub(crate) fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
     (a as f32 + (b as f32 - a as f32) * t.clamp(0.0, 1.0)) as u8
-}
-
-fn mode_color_mut<'a>(theme: &'a mut Theme, name: &str) -> Option<&'a mut Color> {
-    match name {
-        "mode_build" => Some(&mut theme.mode_build),
-        "mode_plan" => Some(&mut theme.mode_plan),
-        "mode_bash" => Some(&mut theme.mode_bash),
-        _ => None,
-    }
 }
 
 /// A plugin style table as a theme style. A color the terminal owns stays
@@ -1296,8 +1298,8 @@ mod tests {
     #[test]
     fn dracula_derivations() {
         let t = dracula();
-        assert_eq!(t.mode_build, Color::Rgb(0x8b, 0xe9, 0xfd));
-        assert_eq!(t.mode_plan, Color::Rgb(0xff, 0x79, 0xc6));
+        assert_eq!(t.mode_build.fg, Some(Color::Rgb(0x8b, 0xe9, 0xfd)));
+        assert_eq!(t.mode_plan.fg, Some(Color::Rgb(0xff, 0x79, 0xc6)));
         assert_eq!(t.heading.fg, Some(Color::Rgb(0x8b, 0xe9, 0xfd)));
         assert!(t.heading.add_modifier.contains(Modifier::BOLD));
         assert_eq!(t.inline_code.fg, Some(Color::Rgb(0x50, 0xfa, 0x7b)));
@@ -1433,9 +1435,9 @@ mod tests {
     #[test]
     fn mode_colors_are_readable_as_styles() {
         let theme = dracula();
-        assert_eq!(style_in(&theme, "mode_build").fg, Some(theme.mode_build));
-        assert_eq!(style_in(&theme, "mode_plan").fg, Some(theme.mode_plan));
-        assert_eq!(style_in(&theme, "mode_bash").fg, Some(theme.mode_bash));
+        assert_eq!(style_in(&theme, "mode_build"), theme.mode_build);
+        assert_eq!(style_in(&theme, "mode_plan"), theme.mode_plan);
+        assert_eq!(style_in(&theme, "mode_bash"), theme.mode_bash);
     }
 
     #[test]
@@ -1443,21 +1445,25 @@ mod tests {
         assert!(load_by_name("nonexistent").is_err());
     }
 
-    /// A mode key is a bare color, so a style that carries anything else
-    /// would land halfway. It is refused instead.
+    /// A mode colour is a style like any other, so a modifier a plugin asks
+    /// for lands too.
     #[test]
-    fn a_mode_colour_refuses_a_style_it_cannot_paint() {
-        let bold = SpanStyle::Inline(InlineStyle {
-            bold: true,
-            ..Default::default()
-        });
-        assert!(set_style_override("test", "mode_build", Some(bold)).is_err());
-        let background = SpanStyle::Inline(InlineStyle {
-            fg: Some(SpanColor::Rgb((1, 2, 3))),
-            bg: Some(SpanColor::Rgb((4, 5, 6))),
-            ..Default::default()
-        });
-        assert!(set_style_override("test", "mode_build", Some(background)).is_err());
+    fn a_mode_colour_takes_a_whole_style() {
+        let mut overrides = BTreeMap::new();
+        overrides.insert(
+            "mode_build".to_owned(),
+            (
+                "test".to_owned(),
+                SpanStyle::Inline(InlineStyle {
+                    fg: Some(SpanColor::Rgb((1, 2, 3))),
+                    bold: true,
+                    ..Default::default()
+                }),
+            ),
+        );
+        let painted = Theme::from_theme(&dracula(), &overrides);
+        assert_eq!(painted.mode_build.fg, Some(Color::Rgb(1, 2, 3)));
+        assert!(painted.mode_build.add_modifier.contains(Modifier::BOLD));
     }
 
     /// The theme and its overrides are global and the suite runs in parallel,
@@ -1485,7 +1491,7 @@ mod tests {
             ),
         );
         let painted = Theme::from_theme(&base, &overrides);
-        assert_eq!(painted.mode_build, Color::Rgb(1, 2, 3));
+        assert_eq!(painted.mode_build.fg, Some(Color::Rgb(1, 2, 3)));
 
         assert!(is_settable_style("separator"), "a field is settable");
         assert!(is_settable_style("mode_build"), "a mode colour is settable");
@@ -1545,7 +1551,7 @@ heading = { fg = "custom", modifiers = ["bold"] }
 "##;
         let theme = Theme::from_toml(toml).unwrap();
         assert_eq!(theme.heading.fg, Some(Color::Rgb(0xaa, 0xbb, 0xcc)));
-        assert_eq!(theme.mode_build, Color::Rgb(0x8b, 0xe9, 0xfd));
+        assert_eq!(theme.mode_build.fg, Some(Color::Rgb(0x8b, 0xe9, 0xfd)));
     }
 
     #[test]
@@ -1563,8 +1569,8 @@ foreground = "#f8f8f2"
 background = "#282a36"
 "##;
         let theme = Theme::from_toml(toml).unwrap();
-        assert_eq!(theme.mode_build, Color::Rgb(0x8b, 0xe9, 0xfd));
-        assert_eq!(theme.mode_plan, Color::Rgb(0xff, 0x79, 0xc6));
+        assert_eq!(theme.mode_build.fg, Some(Color::Rgb(0x8b, 0xe9, 0xfd)));
+        assert_eq!(theme.mode_plan.fg, Some(Color::Rgb(0xff, 0x79, 0xc6)));
         assert_eq!(theme.heading.fg, Some(Color::Rgb(0x8b, 0xe9, 0xfd)));
         assert!(theme.heading.add_modifier.contains(Modifier::BOLD));
         assert_eq!(theme.inline_code.fg, Some(Color::Rgb(0x50, 0xfa, 0x7b)));
@@ -1582,7 +1588,7 @@ background = "#282a36"
 mode_build = "#112233"
 "##;
         let theme = Theme::from_toml(toml).unwrap();
-        assert_eq!(theme.mode_build, Color::Rgb(0x11, 0x22, 0x33));
+        assert_eq!(theme.mode_build.fg, Some(Color::Rgb(0x11, 0x22, 0x33)));
     }
 
     #[test]

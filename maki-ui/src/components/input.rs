@@ -1181,7 +1181,7 @@ mod tests {
         placeholder: Placeholder,
         show_cursor: bool,
     ) -> Rendered {
-        let border_style = Style::new().fg(theme::current().mode_build);
+        let border_style = theme::current().mode_build;
         let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         let mut cursor = None;

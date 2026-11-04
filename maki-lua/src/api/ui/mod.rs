@@ -1240,7 +1240,7 @@ pub(crate) const set_theme_style__doc: FnDoc = FnDoc {
         ParamDoc {
             name: "{style}",
             ty: "string|table|nil",
-            desc: "A theme style name like `\"error\"`, a table `{ fg, bg, bold, italic, underline, dim, strikethrough, reversed }`, or nil to restore the theme. A mode colour (`mode_build`, `mode_plan`, `mode_bash`) is one colour, so it takes `fg` and nothing else.",
+            desc: "A theme style name like `\"error\"`, a table `{ fg, bg, bold, italic, underline, dim, strikethrough, reversed }`, or nil to restore the theme. The mode colours (`mode_build`, `mode_plan`, `mode_bash`) are styles too.",
         },
     ],
     returns: "",

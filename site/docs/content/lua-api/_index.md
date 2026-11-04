@@ -7702,7 +7702,7 @@ Repaints one theme style, such as `"separator"` or `"panel_border"`, and keeps i
 **Parameters:**
 
 - `{name}` (`string`) The `[ui]` key to paint, e.g. `"separator"` for the rule under the transcript and around the input box. A name the theme does not paint changes nothing.
-- `{style}` (`string|table|nil`) A theme style name like `"error"`, a table `{ fg, bg, bold, italic, underline, dim, strikethrough, reversed }`, or nil to restore the theme. A mode colour (`mode_build`, `mode_plan`, `mode_bash`) is one colour, so it takes `fg` and nothing else.
+- `{style}` (`string|table|nil`) A theme style name like `"error"`, a table `{ fg, bg, bold, italic, underline, dim, strikethrough, reversed }`, or nil to restore the theme. The mode colours (`mode_build`, `mode_plan`, `mode_bash`) are styles too.
 
 **Example:**
 
