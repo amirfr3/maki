@@ -7005,7 +7005,8 @@ still work. The calls that need a screen behave like this:
   Plugin actions still run.
 - `open_editor` returns -1.
 - `flash` writes to the log.
-- `open_win`, `set_status_hint`, `set_window_title`, `set_mode` and `input_rules` have no effect.
+- `open_win`, `set_status_hint`, `set_window_title`, `set_mode`, `set_theme_style` and
+  `input_rules` have no effect.
   `input_rules` still throws on a bad rule, so a plugin's tests catch it.
 
 ### Chat input
@@ -7663,6 +7664,29 @@ maki.api.create_autocmd("TurnEnd", {
     maki.ui.set_status_hint(nil, { session = ev.data.session_id })
   end,
 })
+```
+
+---
+
+### `maki.ui.set_theme_style()` {#maki-ui-set_theme_style}
+
+```lua
+maki.ui.set_theme_style({name}, {style})
+```
+
+Repaints one theme style, such as `"separator"` or `"panel_border"`, and keeps it painted across a theme switch. The last plugin to set a name wins. Unloading the plugin, or passing nil, gives the theme its own value back. A name the theme cannot paint, or a style built only from a bare color such as `"background"`, is logged and ignored.
+
+**Parameters:**
+
+- `{name}` (`string`) The `[ui]` key to paint, e.g. `"separator"` for the rule under the transcript and around the input box. A name the theme does not paint changes nothing.
+- `{style}` (`string|table|nil`) A theme style name like `"error"`, a table `{ fg, bg, bold, italic, underline, dim, strikethrough, reversed }`, or nil to restore the theme.
+
+**Example:**
+
+```lua
+maki.ui.set_theme_style("separator", { fg = "#ff79c6" })
+-- back to the theme:
+maki.ui.set_theme_style("separator", nil)
 ```
 
 ---

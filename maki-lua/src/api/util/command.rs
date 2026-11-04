@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use arc_swap::ArcSwap;
 use maki_agent::agent::SessionExport;
-use maki_agent::{Envelope, SharedBuf, SubagentInfo, TaskEnd, Transcript};
+use maki_agent::{Envelope, SharedBuf, SpanStyle, SubagentInfo, TaskEnd, Transcript};
 use maki_storage::id::MakiId;
 use mlua::{Lua, RegistryKey, Result as LuaResult, Value};
 use strum::{EnumString, VariantNames};
@@ -783,6 +783,13 @@ pub enum UiAction {
         cmd_rx: flume::Receiver<WinCommand>,
     },
     Flash(String),
+    /// `maki.ui.set_theme_style`: `[ui] {name}` takes {style} until the plugin
+    /// clears it with `None` or unloads.
+    SetThemeStyle {
+        plugin: Arc<str>,
+        name: String,
+        style: Option<SpanStyle>,
+    },
     SetWindowTitle(String),
     OpenEditor {
         path: PathBuf,

@@ -39,6 +39,7 @@ const INPUT_DECORATE: &str = "input_decorate";
 const INPUT_SUBMIT: &str = "input_submit";
 const OPEN_WIN: &str = "open_win";
 const SET_STATUS_HINT: &str = "set_status_hint";
+const SET_THEME_STYLE: &str = "set_theme_style";
 const SESSION_OPT: &str = "session";
 const SINGLE_EDIT_KEYS: [&str; 3] = ["start", "stop", "text"];
 const NOT_A_LIST_ERR: &str = "is a list of tables, so wrap a single one in {}";
@@ -1205,6 +1206,29 @@ pub(crate) const set_status_hint__doc: FnDoc = FnDoc {
     example: "maki.ui.set_status_hint({ {\"q\", \"quit\"}, {\"j\", \"down\"} })\n-- later, clear them:\nmaki.ui.set_status_hint(nil)\n\n-- Only in the tab of the session that is running a turn:\nmaki.api.create_autocmd(\"TurnStart\", {\n  callback = function(ev)\n    maki.ui.set_status_hint({ {\"Esc\", \"cancel\"} }, { session = ev.data.session_id })\n  end,\n})\nmaki.api.create_autocmd(\"TurnEnd\", {\n  callback = function(ev)\n    maki.ui.set_status_hint(nil, { session = ev.data.session_id })\n  end,\n})",
 };
 
+#[allow(non_upper_case_globals)]
+pub(crate) const set_theme_style__doc: FnDoc = FnDoc {
+    name: "set_theme_style",
+    args: "{name}, {style}",
+    desc: "Repaints one theme style, such as `\"separator\"` or `\"panel_border\"`, and keeps it painted across a theme switch. The last plugin to set a name wins. Unloading the plugin, or passing nil, gives the theme its own value back. A name the theme cannot paint, or a style built only from a bare color such as `\"background\"`, is logged and ignored.",
+    params: &[
+        ParamDoc {
+            name: "{name}",
+            ty: "string",
+            desc: "The `[ui]` key to paint, e.g. `\"separator\"` for the rule under the transcript and around the input box. A name the theme does not paint changes nothing.",
+        },
+        ParamDoc {
+            name: "{style}",
+            ty: "string|table|nil",
+            desc: "A theme style name like `\"error\"`, a table `{ fg, bg, bold, italic, underline, dim, strikethrough, reversed }`, or nil to restore the theme.",
+        },
+    ],
+    returns: "",
+    guard: None,
+    value: false,
+    example: "maki.ui.set_theme_style(\"separator\", { fg = \"#ff79c6\" })\n-- back to the theme:\nmaki.ui.set_theme_style(\"separator\", nil)",
+};
+
 lua_table! {
     /// Functions for building interactive UI. Create buffers to hold
     /// content, open floating or split windows to display them, highlight
@@ -1224,7 +1248,8 @@ lua_table! {
     ///   Plugin actions still run.
     /// - `open_editor` returns -1.
     /// - `flash` writes to the log.
-    /// - `open_win`, `set_status_hint`, `set_window_title`, `set_mode` and `input_rules` have no effect.
+    /// - `open_win`, `set_status_hint`, `set_window_title`, `set_mode`, `set_theme_style` and
+    ///   `input_rules` have no effect.
     ///   `input_rules` still throws on a bad rule, so a plugin's tests catch it.
     ///
     /// ### Chat input
@@ -1385,7 +1410,8 @@ lua_table! {
         buf, theme_color, theme_style, highlight, markdown, humantime, terminal_size,
         display_width, truncate_text,
         manual set_mode, manual flash, manual action, manual open_editor, manual open_win, manual set_status_hint,
-        manual set_window_title, manual input, manual input_rules, manual input_decorate,
+        manual set_theme_style, manual set_window_title, manual input, manual input_rules,
+        manual input_decorate,
         manual input_edit, manual input_submit,
     ]
 }
@@ -1422,6 +1448,28 @@ pub(crate) fn create_ui_table(
     input_decorate__register(&t, lua, ui_action_tx.clone(), Arc::clone(&plugin))?;
     input_rules__register(&t, lua, Arc::clone(&plugin))?;
     input_submit__register(&t, lua, ui_action_tx.clone(), reach)?;
+
+    let p = Arc::clone(&plugin);
+    let tx = ui_action_tx.clone();
+    t.set(
+        SET_THEME_STYLE,
+        lua.create_function(move |_lua, (name, style): (String, mlua::Value)| {
+            let style = match &style {
+                mlua::Value::Nil => None,
+                other => Some(crate::api::ui::buf::parse_style(other)?),
+            };
+            let _ = ui_send(
+                tx.as_ref(),
+                UiAction::SetThemeStyle {
+                    plugin: Arc::clone(&p),
+                    name,
+                    style,
+                },
+            );
+            Ok(())
+        })?,
+    )?;
+
     open_win__register(&t, lua, ui_action_tx, Arc::clone(&plugin))?;
 
     let p = Arc::clone(&plugin);

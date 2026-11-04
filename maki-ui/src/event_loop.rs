@@ -1067,6 +1067,15 @@ impl<'t> EventLoop<'t> {
             UiAction::Flash(msg) => {
                 self.focused_app().flash(msg);
             }
+            UiAction::SetThemeStyle {
+                plugin,
+                name,
+                style,
+            } => {
+                if let Err(error) = crate::theme::set_style_override(&plugin, &name, style) {
+                    warn!(%error, %name, "failed to override a theme style");
+                }
+            }
             UiAction::SetWindowTitle(title) => {
                 if let Err(error) = terminal::set_window_title(&title) {
                     warn!(%error, "failed to set window title");
@@ -1151,6 +1160,7 @@ impl<'t> EventLoop<'t> {
                 for rt in &mut self.sessions {
                     rt.app.clear_plugin_marks(&plugin);
                 }
+                crate::theme::clear_style_overrides(&plugin);
             }
             UiAction::RunCommand {
                 cmdline,

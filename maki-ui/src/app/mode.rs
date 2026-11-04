@@ -189,11 +189,16 @@ impl App {
         }
     }
 
-    /// Dim while the agent in front works, so a running task's tab reads
+    /// A theme or a plugin that sets `[ui] separator` paints it. Otherwise it
+    /// dims while the agent in front works, so a running task's tab reads
     /// busy like a streaming main chat.
     pub(super) fn separator_style(&self) -> Style {
+        let current = theme::current();
+        if current.separator != Style::default() {
+            return current.separator;
+        }
         if self.active_chat_working() {
-            theme::current().input_border
+            current.input_border
         } else {
             Style::new().fg(self.effective_mode_color())
         }
