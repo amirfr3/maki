@@ -558,6 +558,12 @@ named_styles!(t => {
 ; derived: {
     "background" => Style::new().bg(t.background),
     "foreground" => Style::new().fg(t.foreground),
+    // Readable so a plugin can ask what color the mode label has, even
+    // though these keys are a bare Color and an override writes them
+    // through `mode_color_mut`.
+    "mode_build" => Style::new().fg(t.mode_build),
+    "mode_plan" => Style::new().fg(t.mode_plan),
+    "mode_bash" => Style::new().fg(t.mode_bash),
 });
 
 #[derive(Debug, Clone)]
@@ -1391,6 +1397,17 @@ mod tests {
                 result.unwrap_err()
             );
         }
+    }
+
+    /// The mode colours are a bare `Color`, not a style field, but a plugin
+    /// still needs to read them: the session bar paints its name block with
+    /// the colour the mode label has.
+    #[test]
+    fn mode_colors_are_readable_as_styles() {
+        let theme = dracula();
+        assert_eq!(style_in(&theme, "mode_build").fg, Some(theme.mode_build));
+        assert_eq!(style_in(&theme, "mode_plan").fg, Some(theme.mode_plan));
+        assert_eq!(style_in(&theme, "mode_bash").fg, Some(theme.mode_bash));
     }
 
     #[test]
