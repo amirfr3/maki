@@ -421,10 +421,10 @@ fn render_diff_code(lines: &mut Vec<Line>, code: &str, inner: Option<&str>, widt
                 None => push_code_segments(lines, segs, None),
                 Some(_) => {
                     let mut segs = segs;
-                    if line.starts_with(' ') {
-                        if let Some(first) = segs.first_mut() {
-                            first.text.insert(0, ' ');
-                        }
+                    if line.starts_with(' ')
+                        && let Some(first) = segs.first_mut()
+                    {
+                        first.text.insert(0, ' ');
                     }
                     push_code_segments(lines, segs, None);
                 }
