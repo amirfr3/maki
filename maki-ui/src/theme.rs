@@ -309,11 +309,36 @@ pub fn set_style_override(
     name: &str,
     style: Option<SpanStyle>,
 ) -> Result<(), String> {
-    if style.is_some() && !is_settable_style(name) {
-        return Err(format!("{name} is not a style a theme can paint"));
+    if let Some(style) = &style {
+        if !is_settable_style(name) {
+            return Err(format!("{name} is not a style a theme can paint"));
+        }
+        // A mode key is a bare color, so only its foreground lands. Say so
+        // rather than accept a bold or a background that does nothing.
+        if MODE_COLOR_NAMES.contains(&name) {
+            let resolved = match style {
+                SpanStyle::Default => Style::default(),
+                SpanStyle::Named(named) => style_by_name(named),
+                SpanStyle::Inline(inline) => inline_to_style(inline),
+            };
+            if resolved.fg.is_none() || resolved.bg.is_some() || !resolved.add_modifier.is_empty() {
+                return Err(format!("{name} is a single colour, so it takes fg only"));
+            }
+        }
     }
     {
         let mut overrides = STYLE_OVERRIDES.lock().unwrap();
+        // A repaint of the same plugin and style is not repeated: a publish
+        // rebuilds the theme and drops every cached highlight block, and a
+        // plugin may map a key or a tick to one colour.
+        let unchanged = match (&style, overrides.get(name)) {
+            (None, None) => true,
+            (Some(style), Some((owner, current))) => owner == plugin && current == style,
+            _ => false,
+        };
+        if unchanged {
+            return Ok(());
+        }
         match style {
             Some(style) => {
                 overrides.insert(name.to_owned(), (plugin.to_owned(), style));
@@ -624,7 +649,10 @@ pub struct Theme {
     pub palette: HashMap<String, String>,
     pub input_border: Style,
     /// The rule under the transcript and around the input box. Unset keeps
-    /// the mode colour at rest and `input_border` while the agent works.
+    /// the mode colour at rest and `input_border` while the agent works. Set,
+    /// it wins in both states, so the busy dim no longer shows. A style with
+    /// no field set reads as unset, because that is what `style()` returns for
+    /// a key the theme leaves out.
     pub separator: Style,
     pub accent: Style,
     pub active: Style,
@@ -1413,6 +1441,23 @@ mod tests {
     #[test]
     fn load_by_name_unknown() {
         assert!(load_by_name("nonexistent").is_err());
+    }
+
+    /// A mode key is a bare color, so a style that carries anything else
+    /// would land halfway. It is refused instead.
+    #[test]
+    fn a_mode_colour_refuses_a_style_it_cannot_paint() {
+        let bold = SpanStyle::Inline(InlineStyle {
+            bold: true,
+            ..Default::default()
+        });
+        assert!(set_style_override("test", "mode_build", Some(bold)).is_err());
+        let background = SpanStyle::Inline(InlineStyle {
+            fg: Some(SpanColor::Rgb((1, 2, 3))),
+            bg: Some(SpanColor::Rgb((4, 5, 6))),
+            ..Default::default()
+        });
+        assert!(set_style_override("test", "mode_build", Some(background)).is_err());
     }
 
     /// The theme and its overrides are global and the suite runs in parallel,
