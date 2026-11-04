@@ -261,6 +261,26 @@ fn theme_color(lua: &Lua, name: String) -> LuaResult<mlua::Value> {
     ))
 }
 
+/// The running theme's `[palette]`: the names a theme file defines and the
+/// colours they stand for. A picker can offer the user's own colours first
+/// instead of a fixed list.
+///
+/// @return (table) Name to colour, each spelled as `maki.ui.theme_color` spells
+///   it. Empty when the theme has no `[palette]`.
+/// @example
+/// for name, color in pairs(maki.ui.get_theme_palette()) do
+///   print(name, color)
+/// end
+#[lua_fn]
+fn get_theme_palette(lua: &Lua) -> LuaResult<mlua::Table> {
+    let palette = maki_highlight::ui_palette();
+    let tbl = lua.create_table_with_capacity(0, palette.len())?;
+    for (name, color) in palette {
+        tbl.raw_set(name, color)?;
+    }
+    Ok(tbl)
+}
+
 /// Looks up a named style from the current theme. The names are the ones a span
 /// already takes as a string ("dim", "item_selected", "keybind_section",
 /// "diff_old", ...), so `{ text, "dim" }` and `theme_style("dim")` paint the
@@ -1410,7 +1430,7 @@ lua_table! {
     /// draft across chat switches, go away when the plugin unloads, and are
     /// not saved.
     extend "maki.ui" => pub(crate) fn add_ui_fns(), DOCS [
-        buf, theme_color, theme_style, highlight, markdown, humantime, terminal_size,
+        buf, theme_color, theme_style, get_theme_palette, highlight, markdown, humantime, terminal_size,
         display_width, truncate_text,
         manual set_mode, manual flash, manual action, manual open_editor, manual open_win, manual set_status_hint,
         manual set_theme_style, manual set_window_title, manual input, manual input_rules,

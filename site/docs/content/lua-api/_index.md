@@ -7603,6 +7603,29 @@ buf:line({ { "note", { fg = dim.fg, bg = sel.bg } } })
 
 ---
 
+### `maki.ui.get_theme_palette()` {#maki-ui-get_theme_palette}
+
+```lua
+maki.ui.get_theme_palette()
+```
+
+The running theme's `[palette]`: the names a theme file defines and the
+colours they stand for. A picker can offer the user's own colours first
+instead of a fixed list.
+
+**Returns:** (`table`) Name to colour, each spelled as `maki.ui.theme_color` spells
+  it. Empty when the theme has no `[palette]`.
+
+**Example:**
+
+```lua
+for name, color in pairs(maki.ui.get_theme_palette()) do
+  print(name, color)
+end
+```
+
+---
+
 ### `maki.ui.highlight()` {#maki-ui-highlight}
 
 ```lua
