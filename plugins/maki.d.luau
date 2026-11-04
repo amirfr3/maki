@@ -199,6 +199,7 @@ declare maki: {
     buf: @checked (opts: any) -> (any),
     theme_color: @checked (name: string) -> (string?),
     theme_style: @checked (name: string) -> (any),
+    get_theme_palette: @checked () -> (any),
     highlight: @checked (code: string, lang: string, opts: any) -> (any),
     markdown: @checked (text: string, width: number) -> (any),
     humantime: @checked (secs: number) -> (string),

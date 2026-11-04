@@ -613,6 +613,9 @@ pub struct Theme {
     pub panel_title: Style,
     pub cursor: Style,
     pub cursor_unfocused: Style,
+    /// Every `[palette]` entry as the theme file spells it, so a plugin can
+    /// offer the theme's own colours. Untouched by a plugin style override.
+    pub palette: HashMap<String, String>,
     pub input_border: Style,
     /// The rule under the transcript and around the input box. Unset keeps
     /// the mode colour at rest and `input_border` while the agent works.
@@ -1130,6 +1133,7 @@ impl Theme {
                     s
                 }
             },
+            palette: raw_palette.clone(),
             syntax,
         })
     }

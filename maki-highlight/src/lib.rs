@@ -124,6 +124,7 @@ pub fn ansi_color_index(name: &str) -> Option<u8> {
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static THEME: OnceLock<RwLock<Arc<Theme>>> = OnceLock::new();
 static UI_STYLES: OnceLock<RwLock<HashMap<String, UiStyle>>> = OnceLock::new();
+static UI_PALETTE: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new();
 static BLOCK_CACHE: OnceLock<RwLock<BlockCache>> = OnceLock::new();
 static THEME_GEN: AtomicU64 = AtomicU64::new(0);
 
@@ -258,6 +259,23 @@ fn ui_styles_lock() -> &'static RwLock<HashMap<String, UiStyle>> {
 
 pub fn set_ui_styles(styles: HashMap<String, UiStyle>) {
     *ui_styles_lock().write().unwrap_or_else(|e| e.into_inner()) = styles;
+}
+
+fn ui_palette_lock() -> &'static RwLock<HashMap<String, String>> {
+    UI_PALETTE.get_or_init(RwLock::default)
+}
+
+/// The running theme's `[palette]`: each name and the colour the file spells
+/// for it, so a plugin can offer the theme's own colours instead of guessing.
+pub fn set_ui_palette(palette: HashMap<String, String>) {
+    *ui_palette_lock().write().unwrap_or_else(|e| e.into_inner()) = palette;
+}
+
+pub fn ui_palette() -> HashMap<String, String> {
+    ui_palette_lock()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
 }
 
 pub fn ui_style(name: &str) -> Option<UiStyle> {
