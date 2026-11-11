@@ -25,6 +25,14 @@ const HR_CHAR: char = '─';
 const MIN_COL_WIDTH: usize = 5;
 const LONG_LINE_SUFFIX: &str = "...";
 
+/// Which side of a diff a highlighted token sits on, so the consumer can
+/// paint the diff background under the syntax colors.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DiffSide {
+    Old,
+    New,
+}
+
 /// Semantic style token. Emphasis (bold/italic/strike/underline) lives on
 /// the `Span`, not here, so they compose independently.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -38,12 +46,18 @@ pub enum StyleToken {
         bold: bool,
         italic: bool,
         underline: bool,
+        diff: Option<DiffSide>,
     },
     CodeBar,
     Heading,
     ListMarker,
     TableBorder,
     HorizontalRule,
+    DiffOld,
+    DiffNew,
+    DiffOldSign,
+    DiffNewSign,
+    DiffMeta,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -264,28 +278,22 @@ fn render_block(
         }
         Block::Code { lang, code } => {
             ensure_blank_line(lines);
-            let segments = state.code_segments(lang, code);
-            let start = lines.len();
-            for segs in segments {
-                let mut spans = vec![Span::new(CODE_BAR, StyleToken::CodeBar)];
-                for seg in segs {
-                    spans.push(Span::new(
-                        seg.text,
-                        StyleToken::Highlight {
-                            fg: seg.fg,
-                            bold: seg.bold,
-                            italic: seg.italic,
-                            underline: seg.underline,
-                        },
-                    ));
+            match parse_diff_fence(lang) {
+                Some(fence) => {
+                    if state.incremental && state.code_idx >= state.highlighters.len() {
+                        state.highlighters.push(CodeHighlighter::new(lang));
+                    }
+                    render_diff_code(lines, code, fence.inner(), ctx.width);
                 }
-                coalesce_adjacent_spans(&mut spans);
-                lines.push(Line {
-                    kind: LineKind::Code,
-                    spans,
-                });
+                None => {
+                    let segments = state.code_segments(lang, code);
+                    let start = lines.len();
+                    for segs in segments {
+                        push_code_segments(lines, segs, None);
+                    }
+                    wrap_code_lines(lines, start, ctx.width);
+                }
             }
-            wrap_code_lines(lines, start, ctx.width);
             ensure_blank_line(lines);
             state.code_idx += 1;
         }
@@ -302,6 +310,176 @@ fn render_block(
             state.table_idx += 1;
         }
     }
+}
+
+enum DiffFence<'a> {
+    Plain,
+    WithLang(&'a str),
+}
+
+impl DiffFence<'_> {
+    fn inner(&self) -> Option<&str> {
+        match self {
+            DiffFence::Plain => None,
+            DiffFence::WithLang(lang) => Some(lang),
+        }
+    }
+}
+
+/// A `diff` fence renders red/green. `diff:<lang>` additionally syntax
+/// highlights the changed lines with `<lang>`.
+fn parse_diff_fence(lang: &str) -> Option<DiffFence<'_>> {
+    let (tag, rest) = lang.split_once(':').unwrap_or((lang, ""));
+    if !tag.eq_ignore_ascii_case("diff") {
+        return None;
+    }
+    if rest.is_empty() {
+        Some(DiffFence::Plain)
+    } else {
+        Some(DiffFence::WithLang(rest))
+    }
+}
+
+enum DiffLineKind {
+    Old,
+    New,
+    Meta,
+    Context,
+}
+
+fn diff_line_kind(line: &str) -> DiffLineKind {
+    if line.starts_with("---")
+        || line.starts_with("+++")
+        || line.starts_with("@@")
+        || line.starts_with('\\')
+        || line.starts_with("diff ")
+        || line.starts_with("index ")
+    {
+        DiffLineKind::Meta
+    } else if line.starts_with('+') {
+        DiffLineKind::New
+    } else if line.starts_with('-') {
+        DiffLineKind::Old
+    } else {
+        DiffLineKind::Context
+    }
+}
+
+/// Drops each line's diff marker (` `, `+`, `-`) so a syntax highlighter
+/// sees valid source. Lines that start with anything else are left alone;
+/// line count is preserved exactly.
+fn strip_diff_markers(code: &str) -> String {
+    code.split_inclusive('\n')
+        .map(|line| match line.as_bytes().first() {
+            Some(b' ') | Some(b'+') | Some(b'-') => &line[1..],
+            _ => line,
+        })
+        .collect()
+}
+
+fn push_code_segments(lines: &mut Vec<Line>, segs: Vec<StyledSegment>, diff: Option<DiffSide>) {
+    let mut spans = vec![Span::new(CODE_BAR, StyleToken::CodeBar)];
+    for seg in segs {
+        spans.push(Span::new(
+            seg.text,
+            StyleToken::Highlight {
+                fg: seg.fg,
+                bold: seg.bold,
+                italic: seg.italic,
+                underline: seg.underline,
+                diff,
+            },
+        ));
+    }
+    coalesce_adjacent_spans(&mut spans);
+    lines.push(Line {
+        kind: LineKind::Code,
+        spans,
+    });
+}
+
+fn render_diff_code(lines: &mut Vec<Line>, code: &str, inner: Option<&str>, width: u16) {
+    let start = lines.len();
+    // A plain diff highlights through the same plain-text syntax a bare
+    // fence uses, so unformatted lines match normal code blocks.
+    let segments: Vec<Vec<StyledSegment>> = match inner {
+        Some(lang) => maki_highlight::highlight_lines_independent(lang, &strip_diff_markers(code)),
+        None => maki_highlight::highlight_lines_independent("", code),
+    };
+
+    for (line, segs) in code.lines().zip(segments) {
+        let kind = diff_line_kind(line);
+        match kind {
+            DiffLineKind::Meta => lines.push(Line {
+                kind: LineKind::Code,
+                spans: vec![
+                    Span::new(CODE_BAR, StyleToken::CodeBar),
+                    Span::new(line, StyleToken::DiffMeta),
+                ],
+            }),
+            DiffLineKind::Context => match inner {
+                None => push_code_segments(lines, segs, None),
+                Some(_) => {
+                    let mut segs = segs;
+                    if line.starts_with(' ') {
+                        if let Some(first) = segs.first_mut() {
+                            first.text.insert(0, ' ');
+                        }
+                    }
+                    push_code_segments(lines, segs, None);
+                }
+            },
+            DiffLineKind::Old | DiffLineKind::New => {
+                let old = matches!(kind, DiffLineKind::Old);
+                let (sign_token, side_token, side) = if old {
+                    (StyleToken::DiffOldSign, StyleToken::DiffOld, DiffSide::Old)
+                } else {
+                    (StyleToken::DiffNewSign, StyleToken::DiffNew, DiffSide::New)
+                };
+                let sign = line.chars().next().map(String::from).unwrap_or_default();
+                match inner {
+                    None => {
+                        let mut spans = vec![
+                            Span::new(CODE_BAR, StyleToken::CodeBar),
+                            Span::new(sign, sign_token),
+                        ];
+                        if let Some(rest) = line.strip_prefix(['+', '-']) {
+                            spans.push(Span::new(rest, side_token));
+                        }
+                        coalesce_adjacent_spans(&mut spans);
+                        lines.push(Line {
+                            kind: LineKind::Code,
+                            spans,
+                        });
+                    }
+                    Some(_) => {
+                        let mut spans = vec![
+                            Span::new(CODE_BAR, StyleToken::CodeBar),
+                            Span::new(sign, sign_token),
+                        ];
+                        for seg in segs {
+                            spans.push(Span::new(
+                                seg.text,
+                                StyleToken::Highlight {
+                                    fg: seg.fg,
+                                    bold: seg.bold,
+                                    italic: seg.italic,
+                                    underline: seg.underline,
+                                    diff: Some(side),
+                                },
+                            ));
+                        }
+                        coalesce_adjacent_spans(&mut spans);
+                        lines.push(Line {
+                            kind: LineKind::Code,
+                            spans,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    wrap_code_lines(lines, start, width);
 }
 
 fn render_line_block(lb: &LineBlock, lines: &mut Vec<Line>, ctx: &RenderCtx) {
@@ -863,6 +1041,8 @@ mod tests {
         "- item\n\n  ```rust\n  fn nested() {}\n  ```\n\n- next",
         "text\n\n```python\ndef f():\n    return 1\n```\n\ntail",
         "```rust\nfn a() {}\nlet x = 1;\n```\n\n```python\nx = 1\n```",
+        "```diff\n--- a\n@@\n-gone\n+added\n ctx\n```",
+        "```diff:python\n-a = 1\n+b = 2\n```",
     ];
 
     /// The syntax theme is a process global. Nextest gives every test its own
@@ -1136,6 +1316,169 @@ mod tests {
                 .count()
                 > 1
         );
+    }
+
+    #[test]
+    fn plain_diff_fence_styles_sides() {
+        let lines = render(
+            "```diff\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-old\n+new\n keep\n```",
+            TEST_WIDTH,
+        );
+        let code: Vec<&Line> = lines.iter().filter(|l| l.kind == LineKind::Code).collect();
+        assert_eq!(code.len(), 6, "{:?}", lines_text(&lines));
+
+        fn style_of<'a>(line: &'a Line, text: &str) -> &'a StyleToken {
+            line.spans
+                .iter()
+                .find(|s| s.text == text)
+                .map(|s| &s.style)
+                .unwrap_or_else(|| panic!("no span {text:?}"))
+        }
+        assert_eq!(style_of(code[0], "--- a/x.py"), &StyleToken::DiffMeta);
+        assert_eq!(style_of(code[1], "+++ b/x.py"), &StyleToken::DiffMeta);
+        assert_eq!(style_of(code[2], "@@ -1 +1 @@"), &StyleToken::DiffMeta);
+        assert_eq!(style_of(code[3], "-"), &StyleToken::DiffOldSign);
+        assert_eq!(style_of(code[3], "old"), &StyleToken::DiffOld);
+        assert_eq!(style_of(code[4], "+"), &StyleToken::DiffNewSign);
+        assert_eq!(style_of(code[4], "new"), &StyleToken::DiffNew);
+        assert!(matches!(
+            style_of(code[5], " keep"),
+            StyleToken::Highlight { diff: None, .. }
+        ));
+
+        for (line, expected) in code.iter().zip([
+            "--- a/x.py",
+            "+++ b/x.py",
+            "@@ -1 +1 @@",
+            "-old",
+            "+new",
+            " keep",
+        ]) {
+            assert_eq!(line.width() - CODE_BAR.width(), expected.len());
+        }
+    }
+
+    #[test]
+    fn diff_fence_with_lang_marks_sides_on_highlighted_tokens() {
+        let lines = render("```diff:python\n-a = 1\n+b = 2\n c = 3\n```", TEST_WIDTH);
+        let code: Vec<&Line> = lines.iter().filter(|l| l.kind == LineKind::Code).collect();
+        assert_eq!(code.len(), 3, "{:?}", lines_text(&lines));
+
+        let sides: Vec<Vec<Option<DiffSide>>> = code
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .filter_map(|s| match &s.style {
+                        StyleToken::Highlight { diff, .. } => Some(*diff),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .collect();
+        assert!(
+            sides[0].iter().all(|s| *s == Some(DiffSide::Old)),
+            "{sides:?}"
+        );
+        assert!(
+            sides[1].iter().all(|s| *s == Some(DiffSide::New)),
+            "{sides:?}"
+        );
+        assert!(sides[2].iter().all(|s| s.is_none()), "{sides:?}");
+
+        let text: Vec<String> = code
+            .iter()
+            .map(|l| l.spans[1..].iter().map(|s| s.text.as_str()).collect())
+            .collect();
+        assert_eq!(text, ["-a = 1", "+b = 2", " c = 3"]);
+    }
+
+    #[test]
+    fn non_diff_lang_fences_stay_syntax_highlighted() {
+        let lines = render("```rust\nfn x() {}\n```", TEST_WIDTH);
+        assert!(lines.iter().any(|l| {
+            l.spans
+                .iter()
+                .any(|s| matches!(s.style, StyleToken::Highlight { .. }))
+        }));
+    }
+
+    #[test]
+    fn plain_diff_context_line_matches_a_bare_code_block_line() {
+        let diff = render("```diff\n ctx\n```", TEST_WIDTH);
+        let bare = render("```\n ctx\n```", TEST_WIDTH);
+        let diff_line = diff
+            .iter()
+            .find(|l| l.kind == LineKind::Code)
+            .expect("diff code line");
+        let bare_line = bare
+            .iter()
+            .find(|l| l.kind == LineKind::Code)
+            .expect("bare code line");
+        assert_eq!(diff_line.spans, bare_line.spans);
+    }
+
+    #[test]
+    fn diff_fence_edge_lines() {
+        // no trailing newline, a bare marker, and a "\ No newline" note
+        let lines = render(
+            "```diff\n+only\n\\ No newline at end of file\n```",
+            TEST_WIDTH,
+        );
+        let code: Vec<&Line> = lines.iter().filter(|l| l.kind == LineKind::Code).collect();
+        assert_eq!(code.len(), 2, "{:?}", lines_text(&lines));
+        assert_eq!(code[0].spans[1].text, "+");
+        assert_eq!(code[0].spans[1].style, StyleToken::DiffNewSign);
+        assert_eq!(code[1].spans[1].text, "\\ No newline at end of file");
+        assert_eq!(code[1].spans[1].style, StyleToken::DiffMeta);
+    }
+
+    #[test]
+    fn diff_fence_empty_body_renders_no_code_lines() {
+        let lines = render("```diff\n```", TEST_WIDTH);
+        assert!(!lines.iter().any(|l| l.kind == LineKind::Code));
+    }
+
+    #[test]
+    fn diff_fence_with_lang_keeps_markerless_context_line_intact() {
+        let lines = render("```diff:python\nx = 1\n```", TEST_WIDTH);
+        let code: Vec<&Line> = lines.iter().filter(|l| l.kind == LineKind::Code).collect();
+        assert_eq!(code.len(), 1, "{:?}", lines_text(&lines));
+        let text: String = code[0].spans[1..].iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(text, "x = 1");
+        assert!(
+            code[0].spans[1..]
+                .iter()
+                .all(|s| matches!(&s.style, StyleToken::Highlight { diff: None, .. }))
+        );
+    }
+
+    #[test]
+    fn diff_fence_wrapping_keeps_the_side_on_continuation_lines() {
+        let long = format!("+fn a() {{ let x = \"{}\"; }}", "y".repeat(60));
+        let md = format!("```diff:rust\n{long}\n```");
+        let lines = render(&md, NARROW_WIDTH);
+        let wrapped: Vec<&Line> = lines.iter().filter(|l| l.kind == LineKind::Code).collect();
+        assert!(wrapped.len() > 1);
+        for line in &wrapped {
+            assert!(
+                line.spans[1..].iter().all(|s| matches!(
+                    &s.style,
+                    StyleToken::DiffNewSign
+                        | StyleToken::Highlight {
+                            diff: Some(DiffSide::New),
+                            ..
+                        }
+                )),
+                "side lost on {:?}",
+                line.spans
+            );
+        }
+        let joined: String = wrapped
+            .iter()
+            .flat_map(|l| l.spans[1..].iter().map(|s| s.text.as_str()))
+            .collect();
+        assert_eq!(joined, long);
     }
 
     #[test]

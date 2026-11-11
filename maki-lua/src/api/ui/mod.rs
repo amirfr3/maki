@@ -1554,7 +1554,7 @@ fn segments_to_lua_lines(
 /// No wildcard arm on `StyleToken`: adding a variant is a compile error
 /// here, so we can't forget to map it.
 fn span_style_to_lua(lua: &Lua, span: &maki_markdown::render::Span) -> LuaResult<mlua::Value> {
-    use maki_markdown::render::StyleToken;
+    use maki_markdown::render::{DiffSide, StyleToken};
 
     let v = match &span.style {
         StyleToken::Text => {
@@ -1567,6 +1567,7 @@ fn span_style_to_lua(lua: &Lua, span: &maki_markdown::render::Span) -> LuaResult
             bold,
             italic,
             underline,
+            diff,
         } => {
             let tbl = lua.create_table()?;
             tbl.set("fg", segment_color_to_lua(*fg))?;
@@ -1579,6 +1580,13 @@ fn span_style_to_lua(lua: &Lua, span: &maki_markdown::render::Span) -> LuaResult
             if *underline {
                 tbl.set("underline", true)?;
             }
+            if let Some(side) = diff {
+                let name = match side {
+                    DiffSide::Old => "diff_old",
+                    DiffSide::New => "diff_new",
+                };
+                tbl.set("diff", name)?;
+            }
             mlua::Value::Table(tbl)
         }
         StyleToken::CodeBar => mlua::Value::String(lua.create_string("code_gutter")?),
@@ -1586,6 +1594,11 @@ fn span_style_to_lua(lua: &Lua, span: &maki_markdown::render::Span) -> LuaResult
         StyleToken::ListMarker => mlua::Value::String(lua.create_string("list_marker")?),
         StyleToken::TableBorder => mlua::Value::String(lua.create_string("table_border")?),
         StyleToken::HorizontalRule => mlua::Value::String(lua.create_string("horizontal_rule")?),
+        StyleToken::DiffOld => mlua::Value::String(lua.create_string("diff_old")?),
+        StyleToken::DiffNew => mlua::Value::String(lua.create_string("diff_new")?),
+        StyleToken::DiffOldSign => mlua::Value::String(lua.create_string("diff_old_sign")?),
+        StyleToken::DiffNewSign => mlua::Value::String(lua.create_string("diff_new_sign")?),
+        StyleToken::DiffMeta => mlua::Value::String(lua.create_string("dim")?),
     };
     Ok(v)
 }
@@ -1631,6 +1644,7 @@ mod tests {
     use crate::plugin_permissions::{Permission, PluginPermissions, denied_error};
     use crate::runtime::mark_loaded;
     use maki_highlight::StyledSegment;
+    use maki_markdown::render::{DiffSide, StyleToken};
     use mlua::Lua;
     use test_case::test_case;
     use tokio::sync::mpsc::UnboundedSender;
@@ -2266,6 +2280,7 @@ mod tests {
                     bold,
                     italic,
                     underline,
+                    diff: None,
                 },
                 emphasis: maki_markdown::Emphasis::default(),
             };
@@ -2286,6 +2301,53 @@ mod tests {
                     .unwrap_or(false),
                 underline
             );
+            assert_eq!(tbl.get::<Option<String>>("diff").unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn span_style_to_lua_highlight_carries_diff_side() {
+        let lua = Lua::new();
+        for (side, expected) in [(DiffSide::Old, "diff_old"), (DiffSide::New, "diff_new")] {
+            let span = maki_markdown::render::Span {
+                text: "tok".into(),
+                style: maki_markdown::render::StyleToken::Highlight {
+                    fg: SegmentColor::Rgb((255, 128, 0)),
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    diff: Some(side),
+                },
+                emphasis: maki_markdown::Emphasis::default(),
+            };
+            let val = span_style_to_lua(&lua, &span).unwrap();
+            let tbl = match val {
+                mlua::Value::Table(t) => t,
+                other => panic!("expected table, got {other:?}"),
+            };
+            assert_eq!(tbl.get::<String>("diff").unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn span_style_to_lua_diff_variants() {
+        let lua = Lua::new();
+        for (token, expected) in [
+            (StyleToken::DiffOld, "diff_old"),
+            (StyleToken::DiffNew, "diff_new"),
+            (StyleToken::DiffOldSign, "diff_old_sign"),
+            (StyleToken::DiffNewSign, "diff_new_sign"),
+            (StyleToken::DiffMeta, "dim"),
+        ] {
+            let span = maki_markdown::render::Span {
+                text: "x".into(),
+                style: token,
+                emphasis: maki_markdown::Emphasis::default(),
+            };
+            match span_style_to_lua(&lua, &span).unwrap() {
+                mlua::Value::String(s) => assert_eq!(s.to_string_lossy(), expected),
+                other => panic!("expected string for {expected}, got {other:?}"),
+            }
         }
     }
 
