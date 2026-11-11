@@ -1,10 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use arc_swap::{ArcSwap, Guard};
-use maki_agent::SpanColor;
+use maki_agent::types::InlineStyle;
+use maki_agent::{SpanColor, SpanStyle};
 use maki_highlight::SegmentColor;
 use maki_storage::StateDir;
 use ratatui::style::{Color, Modifier, Style};
@@ -279,11 +280,91 @@ static CURSOR_FOCUSED: AtomicBool = AtomicBool::new(true);
 
 static CURRENT_NAME: Mutex<Option<String>> = Mutex::new(None);
 
+/// The theme as its file describes it, before any plugin override. A rebuild
+/// starts here, so a cleared override cannot stay baked into the running one.
+static BASE: LazyLock<ArcSwap<Theme>> =
+    LazyLock::new(|| ArcSwap::from_pointee(Theme::load_or_bundled()));
+
+/// `[ui]` key to the style a plugin asked for, with the plugin that asked. A
+/// theme switch re-applies them, and an unload drops them.
+static STYLE_OVERRIDES: Mutex<BTreeMap<String, (String, SpanStyle)>> = Mutex::new(BTreeMap::new());
+
+/// Names a plugin may override: every style with a field behind it.
+pub fn is_settable_style(name: &str) -> bool {
+    STYLE_FIELDS.contains(&name)
+}
+
+fn overrides() -> BTreeMap<String, (String, SpanStyle)> {
+    STYLE_OVERRIDES.lock().unwrap().clone()
+}
+
+/// Gives `[ui] {name}` the style {style} asks for, until {plugin} clears it.
+/// A name the theme cannot paint is refused, so a typo never reads back as a
+/// style the screen does not have.
+pub fn set_style_override(
+    plugin: &str,
+    name: &str,
+    style: Option<SpanStyle>,
+) -> Result<(), String> {
+    if style.is_some() && !is_settable_style(name) {
+        return Err(format!("{name} is not a style a theme can paint"));
+    }
+    {
+        let mut overrides = STYLE_OVERRIDES.lock().unwrap();
+        // A repaint of the same plugin and style is not repeated: a publish
+        // rebuilds the theme and drops every cached highlight block, and a
+        // plugin may map a key or a tick to one colour.
+        let unchanged = match (&style, overrides.get(name)) {
+            (None, None) => true,
+            (Some(style), Some((owner, current))) => owner == plugin && current == style,
+            _ => false,
+        };
+        if unchanged {
+            return Ok(());
+        }
+        match style {
+            Some(style) => {
+                overrides.insert(name.to_owned(), (plugin.to_owned(), style));
+            }
+            None => {
+                overrides.remove(name);
+            }
+        }
+    }
+    patch_running_theme();
+    Ok(())
+}
+
+/// Drops every override a plugin left behind.
+pub fn clear_style_overrides(plugin: &str) {
+    let removed = {
+        let mut overrides = STYLE_OVERRIDES.lock().unwrap();
+        let before = overrides.len();
+        overrides.retain(|_, (owner, _)| owner != plugin);
+        overrides.len() != before
+    };
+    if removed {
+        patch_running_theme();
+    }
+}
+
 pub fn current() -> Guard<Arc<Theme>> {
     THEME.load()
 }
 
 pub fn set(theme: Theme) {
+    BASE.store(Arc::new(theme.clone()));
+    publish(Theme::from_theme(&theme, &overrides()));
+}
+
+/// Repaints the running theme after a plugin changed an override, starting
+/// from the theme its file describes so a cleared one cannot stay baked in.
+pub(crate) fn patch_running_theme() {
+    let base = (**BASE.load()).clone();
+    publish(Theme::from_theme(&base, &overrides()));
+}
+
+fn publish(theme: Theme) {
     // Order matters: install colors before bumping the counter, otherwise a
     // reader could see the new generation but bake with the old palette.
     THEME.store(Arc::new(theme));
@@ -391,14 +472,41 @@ pub fn current_theme_name() -> String {
 /// One list of names feeds both the span lookup and what Lua sees, so a name a
 /// plugin can write in a span is always one it can look up too.
 macro_rules! named_styles {
-    ($t:ident => { $($($name:literal)|+ => $style:expr),+ $(,)? }) => {
-        pub const STYLE_NAMES: &[&str] = &[$($($name),+),+];
+    ($t:ident => { $($($name:literal)|+ => $style:expr),+ $(,)? }
+     ; derived: { $($($derived:literal)|+ => $derived_style:expr),+ $(,)? }) => {
+        pub const STYLE_NAMES: &[&str] = &[$($($name),+,)+ $($($derived),+,)+];
+
+        /// The names a plugin may override: the ones with a field to write.
+        pub const STYLE_FIELDS: &[&str] = &[$($($name),+,)+];
 
         pub fn style_by_name(name: &str) -> Style {
             let $t = current();
             match name {
                 $($($name)|+ => $style,)+
+                $($($derived)|+ => $derived_style,)+
                 _ => Style::default(),
+            }
+        }
+
+        /// The same lookup against a theme the caller holds, so an override
+        /// resolves a name without reading the running theme.
+        pub(crate) fn style_in($t: &Theme, name: &str) -> Style {
+            match name {
+                $($($name)|+ => $style,)+
+                $($($derived)|+ => $derived_style,)+
+                _ => Style::default(),
+            }
+        }
+
+        /// The one field a name owns. A derived name owns none, because it is
+        /// built from a bare color.
+        pub(crate) fn style_field_mut<'a>(
+            $t: &'a mut Theme,
+            name: &str,
+        ) -> Option<&'a mut Style> {
+            match name {
+                $($($name)|+ => Some(&mut $style),)+
+                _ => None,
             }
         }
     };
@@ -415,6 +523,9 @@ named_styles!(t => {
     "spinner" => t.spinner,
     "thinking" => t.thinking,
     "error" => t.error,
+    "mode_build" => t.mode_build,
+    "mode_plan" => t.mode_plan,
+    "mode_bash" => t.mode_bash,
     "bold" => t.bold,
     "italic" => t.italic,
     "bold_italic" => t.bold_italic,
@@ -441,9 +552,9 @@ named_styles!(t => {
     "item_match" | "match" => t.item_match,
     "item_match_selected" | "match_selected" => t.item_match_selected,
     "cursor" => t.cursor,
+    "input_border" => t.input_border,
+    "separator" => t.separator,
     "cursor_unfocused" => t.cursor_unfocused,
-    "background" => Style::new().bg(t.background),
-    "foreground" => Style::new().fg(t.foreground),
     "accent" => t.accent,
     "shell_prefix" => t.shell_prefix,
     "active" => t.active,
@@ -454,9 +565,13 @@ named_styles!(t => {
     "warning" | "todo_in_progress" => t.todo_in_progress,
     "todo_pending" | "pending" => t.todo_pending,
     "todo_cancelled" | "cancelled" => t.todo_cancelled,
+}
+; derived: {
+    "background" => Style::new().bg(t.background),
+    "foreground" => Style::new().fg(t.foreground),
 });
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Theme {
     pub background: Color,
     pub foreground: Color,
@@ -510,14 +625,23 @@ pub struct Theme {
     pub cursor: Style,
     pub cursor_unfocused: Style,
     pub input_border: Style,
+    /// The rule under the transcript and around the input box. Unset keeps
+    /// the mode colour at rest and `input_border` while the agent works. Set,
+    /// it wins in both states, so the busy dim no longer shows. A style with
+    /// no field set reads as unset, because that is what `style()` returns for
+    /// a key the theme leaves out.
+    pub separator: Style,
     pub accent: Style,
     pub active: Style,
     pub keybind_key: Style,
     pub keybind_desc: Style,
     pub keybind_section: Style,
-    pub mode_build: Color,
-    pub mode_plan: Color,
-    pub mode_bash: Color,
+    /// The `[BUILD]` / `[PLAN]` / `[BASH]` label colour. A theme can name a
+    /// whole style in `[ui] mode_build`; without one it derives from the
+    /// syntax theme, as before.
+    pub mode_build: Style,
+    pub mode_plan: Style,
+    pub mode_bash: Style,
     pub queue: Style,
     pub plan_path: Style,
     pub status_notice: Style,
@@ -779,6 +903,27 @@ fn build_syntax_theme(
 }
 
 impl Theme {
+    /// The theme with plugin overrides written into the fields they name, so
+    /// every reader of that style sees the same value. {base} is left alone: a
+    /// rebuild always starts from the theme its file describes.
+    pub(crate) fn from_theme(
+        base: &Theme,
+        overrides: &BTreeMap<String, (String, SpanStyle)>,
+    ) -> Theme {
+        let mut theme = base.clone();
+        for (name, (_, asked)) in overrides {
+            let style = match asked {
+                SpanStyle::Default => Style::default(),
+                SpanStyle::Named(named) => style_in(base, named),
+                SpanStyle::Inline(inline) => inline_to_style(inline),
+            };
+            if let Some(field) = style_field_mut(&mut theme, name) {
+                *field = style;
+            }
+        }
+        theme
+    }
+
     pub(crate) fn from_toml(toml_str: &str) -> Result<Self, String> {
         let full_table: toml::Table = toml::from_str(toml_str).map_err(|e| e.to_string())?;
 
@@ -960,6 +1105,7 @@ impl Theme {
             cursor,
             cursor_unfocused,
             input_border: style("input_border"),
+            separator: style("separator"),
             accent: style("accent"),
             active: {
                 let s = style("active");
@@ -972,9 +1118,39 @@ impl Theme {
             keybind_key: style("keybind_key"),
             keybind_desc: style("keybind_desc"),
             keybind_section: style("keybind_section"),
-            mode_build: derived_color("mode_build", &["keyword.storage.type", "keyword"]),
-            mode_plan: derived_color("mode_plan", &["keyword", "keyword.storage.type"]),
-            mode_bash: derived_color("mode_bash", &["function.builtin", "function"]),
+            mode_build: {
+                let s = style("mode_build");
+                if s == Style::default() {
+                    Style::new().fg(derived_color(
+                        "mode_build",
+                        &["keyword.storage.type", "keyword"],
+                    ))
+                } else {
+                    s
+                }
+            },
+            mode_plan: {
+                let s = style("mode_plan");
+                if s == Style::default() {
+                    Style::new().fg(derived_color(
+                        "mode_plan",
+                        &["keyword", "keyword.storage.type"],
+                    ))
+                } else {
+                    s
+                }
+            },
+            mode_bash: {
+                let s = style("mode_bash");
+                if s == Style::default() {
+                    Style::new().fg(derived_color(
+                        "mode_bash",
+                        &["function.builtin", "function"],
+                    ))
+                } else {
+                    s
+                }
+            },
             queue: style("queue"),
             plan_path: style("plan_path"),
             status_notice: style("status_notice"),
@@ -1024,6 +1200,32 @@ impl Theme {
 
 pub(crate) fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
     (a as f32 + (b as f32 - a as f32) * t.clamp(0.0, 1.0)) as u8
+}
+
+/// A plugin style table as a theme style. A color the terminal owns stays
+/// symbolic: an ANSI index stays an ANSI index.
+fn inline_to_style(inline: &InlineStyle) -> Style {
+    let mut style = Style::default();
+    if let Some(fg) = inline.fg {
+        style = style.fg(to_color(segment_color_from_span(fg)));
+    }
+    if let Some(bg) = inline.bg {
+        style = style.bg(to_color(segment_color_from_span(bg)));
+    }
+    let modifiers = [
+        (inline.bold, Modifier::BOLD),
+        (inline.italic, Modifier::ITALIC),
+        (inline.underline, Modifier::UNDERLINED),
+        (inline.dim, Modifier::DIM),
+        (inline.strikethrough, Modifier::CROSSED_OUT),
+        (inline.reversed, Modifier::REVERSED),
+    ];
+    for (on, modifier) in modifiers {
+        if on {
+            style = style.add_modifier(modifier);
+        }
+    }
+    style
 }
 
 /// A palette color has no numeric value to blend toward the background, so
@@ -1101,8 +1303,8 @@ mod tests {
     #[test]
     fn dracula_derivations() {
         let t = dracula();
-        assert_eq!(t.mode_build, Color::Rgb(0x8b, 0xe9, 0xfd));
-        assert_eq!(t.mode_plan, Color::Rgb(0xff, 0x79, 0xc6));
+        assert_eq!(t.mode_build.fg, Some(Color::Rgb(0x8b, 0xe9, 0xfd)));
+        assert_eq!(t.mode_plan.fg, Some(Color::Rgb(0xff, 0x79, 0xc6)));
         assert_eq!(t.heading.fg, Some(Color::Rgb(0x8b, 0xe9, 0xfd)));
         assert!(t.heading.add_modifier.contains(Modifier::BOLD));
         assert_eq!(t.inline_code.fg, Some(Color::Rgb(0x50, 0xfa, 0x7b)));
@@ -1265,9 +1467,74 @@ scrollbar_thumb = { fg = "magenta", bg = "default" }
         }
     }
 
+    /// The mode colours are a bare `Color`, not a style field, but a plugin
+    /// still needs to read them: the session bar paints its name block with
+    /// the colour the mode label has.
+    #[test]
+    fn mode_colors_are_readable_as_styles() {
+        let theme = dracula();
+        assert_eq!(style_in(&theme, "mode_build"), theme.mode_build);
+        assert_eq!(style_in(&theme, "mode_plan"), theme.mode_plan);
+        assert_eq!(style_in(&theme, "mode_bash"), theme.mode_bash);
+    }
+
     #[test]
     fn load_by_name_unknown() {
         assert!(load_by_name("nonexistent").is_err());
+    }
+
+    /// A mode colour is a style like any other, so a modifier a plugin asks
+    /// for lands too.
+    #[test]
+    fn a_mode_colour_takes_a_whole_style() {
+        let mut overrides = BTreeMap::new();
+        overrides.insert(
+            "mode_build".to_owned(),
+            (
+                "test".to_owned(),
+                SpanStyle::Inline(InlineStyle {
+                    fg: Some(SpanColor::Rgb((1, 2, 3))),
+                    bold: true,
+                    ..Default::default()
+                }),
+            ),
+        );
+        let painted = Theme::from_theme(&dracula(), &overrides);
+        assert_eq!(painted.mode_build.fg, Some(Color::Rgb(1, 2, 3)));
+        assert!(painted.mode_build.add_modifier.contains(Modifier::BOLD));
+    }
+
+    /// The theme and its overrides are global and the suite runs in parallel,
+    /// so this test builds its own themes instead of installing one.
+    #[test]
+    fn a_plugin_override_writes_the_field_it_names() {
+        let base = dracula();
+        let mut overrides = BTreeMap::new();
+        overrides.insert(
+            "separator".to_owned(),
+            ("test".to_owned(), SpanStyle::Named("error".into())),
+        );
+        let painted = Theme::from_theme(&base, &overrides);
+        assert_eq!(painted.separator.fg, painted.error.fg);
+        assert_eq!(base.separator, Style::default(), "the base is untouched");
+
+        overrides.insert(
+            "mode_build".to_owned(),
+            (
+                "test".to_owned(),
+                SpanStyle::Inline(InlineStyle {
+                    fg: Some(SpanColor::Rgb((1, 2, 3))),
+                    ..Default::default()
+                }),
+            ),
+        );
+        let painted = Theme::from_theme(&base, &overrides);
+        assert_eq!(painted.mode_build.fg, Some(Color::Rgb(1, 2, 3)));
+
+        assert!(is_settable_style("separator"), "a field is settable");
+        assert!(is_settable_style("mode_build"), "a mode colour is settable");
+        assert!(!is_settable_style("background"), "a derived style is not");
+        assert!(!is_settable_style("nope"));
     }
 
     #[test]
@@ -1322,7 +1589,7 @@ heading = { fg = "custom", modifiers = ["bold"] }
 "##;
         let theme = Theme::from_toml(toml).unwrap();
         assert_eq!(theme.heading.fg, Some(Color::Rgb(0xaa, 0xbb, 0xcc)));
-        assert_eq!(theme.mode_build, Color::Rgb(0x8b, 0xe9, 0xfd));
+        assert_eq!(theme.mode_build.fg, Some(Color::Rgb(0x8b, 0xe9, 0xfd)));
     }
 
     #[test]
@@ -1340,8 +1607,8 @@ foreground = "#f8f8f2"
 background = "#282a36"
 "##;
         let theme = Theme::from_toml(toml).unwrap();
-        assert_eq!(theme.mode_build, Color::Rgb(0x8b, 0xe9, 0xfd));
-        assert_eq!(theme.mode_plan, Color::Rgb(0xff, 0x79, 0xc6));
+        assert_eq!(theme.mode_build.fg, Some(Color::Rgb(0x8b, 0xe9, 0xfd)));
+        assert_eq!(theme.mode_plan.fg, Some(Color::Rgb(0xff, 0x79, 0xc6)));
         assert_eq!(theme.heading.fg, Some(Color::Rgb(0x8b, 0xe9, 0xfd)));
         assert!(theme.heading.add_modifier.contains(Modifier::BOLD));
         assert_eq!(theme.inline_code.fg, Some(Color::Rgb(0x50, 0xfa, 0x7b)));
@@ -1359,7 +1626,7 @@ background = "#282a36"
 mode_build = "#112233"
 "##;
         let theme = Theme::from_toml(toml).unwrap();
-        assert_eq!(theme.mode_build, Color::Rgb(0x11, 0x22, 0x33));
+        assert_eq!(theme.mode_build.fg, Some(Color::Rgb(0x11, 0x22, 0x33)));
     }
 
     #[test]

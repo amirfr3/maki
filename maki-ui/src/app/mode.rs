@@ -24,7 +24,7 @@ pub(crate) enum PlanTrigger {
 }
 
 impl Mode {
-    pub(crate) fn color(&self) -> Color {
+    pub(crate) fn style(&self) -> Style {
         match self {
             Self::Build => theme::current().mode_build,
             Self::Plan => theme::current().mode_plan,
@@ -171,9 +171,7 @@ impl App {
                 Mode::Plan => "[PLAN]".into(),
             }
         };
-        let style = Style::new()
-            .fg(self.effective_mode_color())
-            .add_modifier(Modifier::BOLD);
+        let style = self.effective_mode_style().add_modifier(Modifier::BOLD);
         (label, style)
     }
 
@@ -181,21 +179,31 @@ impl App {
         self.input_box.buffer.value().starts_with('!')
     }
 
-    pub(super) fn effective_mode_color(&self) -> Color {
+    pub(super) fn effective_mode_style(&self) -> Style {
         if self.is_bash_input() {
             theme::current().mode_bash
         } else {
-            self.state.mode.color()
+            self.state.mode.style()
         }
     }
 
-    /// Dim while the agent in front works, so a running task's tab reads
+    /// The colour alone, for the parts that animate it.
+    pub(super) fn effective_mode_color(&self) -> Color {
+        self.effective_mode_style().fg.unwrap_or(Color::Reset)
+    }
+
+    /// A theme or a plugin that sets `[ui] separator` paints it. Otherwise it
+    /// dims while the agent in front works, so a running task's tab reads
     /// busy like a streaming main chat.
     pub(super) fn separator_style(&self) -> Style {
+        let current = theme::current();
+        if current.separator != Style::default() {
+            return current.separator;
+        }
         if self.active_chat_working() {
-            theme::current().input_border
+            current.input_border
         } else {
-            Style::new().fg(self.effective_mode_color())
+            self.effective_mode_style()
         }
     }
 }

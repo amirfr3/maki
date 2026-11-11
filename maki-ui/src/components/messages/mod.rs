@@ -166,7 +166,7 @@ impl MessagesPanel {
             theme_generation: theme::generation(),
             highlight_segment: None,
             idle_splash: Splash::new(ui_config.splash_animation),
-            accent: ColorTransition::new(theme::current().mode_build),
+            accent: ColorTransition::new(theme::current().mode_build.fg.unwrap_or(Color::Reset)),
             expanded_tools: HashMap::new(),
             lua_clicks: HashMap::new(),
             live_bufs: HashMap::new(),
